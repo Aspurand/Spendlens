@@ -538,7 +538,7 @@ body{font-family:'DM Sans',-apple-system,sans-serif;background:var(--bg);color:v
     <div class="yesterday-banner-amount" id="yesterdayAmount">$0.00</div>
     <div class="yesterday-banner-detail" id="yesterdayDetail"></div>
   </div>
-  <span class="yesterday-banner-close" onclick="document.getElementById('yesterdayBanner').classList.remove('visible')">✕</span>
+  <span class="yesterday-banner-close" onclick="yesterdayDismissed=true;yesterdayDismissedDate=new Date().toISOString().split('T')[0];saveToStorage();document.getElementById('yesterdayBanner').classList.remove('visible')">✕</span>
 </div>
 
 <!-- ============ DASHBOARD ============ -->
@@ -1183,6 +1183,7 @@ let newCardType = 'credit';
 let newCardColor = '#6c5ce7';
 let subCycle = 'monthly';
 let yesterdayDismissed = false;
+let yesterdayDismissedDate = '';
 
 // ============================================================
 // INIT
@@ -1245,6 +1246,7 @@ function loadFromStorage() {
       merchantRules = d.merchantRules || {};
       nightlySyncEnabled = d.nightlySyncEnabled || false;
       yesterdayDismissed = d.yesterdayDismissed || false;
+      yesterdayDismissedDate = d.yesterdayDismissedDate || '';
       cardPayments = d.cardPayments || {};
       incomeEntries = d.incomeEntries || [];
       savingsGoals = d.savingsGoals || [];
@@ -1262,7 +1264,7 @@ function saveToStorage() {
       nextId, nextCardId, nextSubId, syncHistory,
       processedEmailIds: [...processedEmailIds],
       processedPaymentEmailIds: [...processedPaymentEmailIds],
-      gmailUser, merchantRules, nightlySyncEnabled, yesterdayDismissed,
+      gmailUser, merchantRules, nightlySyncEnabled, yesterdayDismissed, yesterdayDismissedDate,
       cardPayments, incomeEntries, savingsGoals, cardBalances,
       nextIncomeId, nextGoalId,
     }));
@@ -1415,6 +1417,12 @@ function clearNightlySyncTimer() {
 }
 
 function showYesterdaySummary() {
+  // Reset dismissed flag if it was from a different day
+  const todayStr = new Date().toISOString().split('T')[0];
+  if (yesterdayDismissed && yesterdayDismissedDate !== todayStr) {
+    yesterdayDismissed = false;
+    saveToStorage();
+  }
   if (yesterdayDismissed) return;
   const yesterday = new Date(Date.now() - 86400000);
   const yDate = yesterday.toISOString().split('T')[0];
@@ -1827,7 +1835,7 @@ function autoCategory(merchant) {
 function detectSubscriptions() {
   const merchantCounts = {};
   const recent = transactions.filter(tx => {
-    const d = new Date(tx.date);
+    const d = new Date(tx.date + 'T12:00:00');
     const threeMonthsAgo = new Date();
     threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
     return d >= threeMonthsAgo;
@@ -1896,13 +1904,12 @@ function autoPostSubscriptions() {
     const postDate = `${todayYear}-${String(todayMonth + 1).padStart(2,'0')}-${String(postDay).padStart(2,'0')}`;
 
     // Check if already posted this month (any transaction matching sub name + same month)
+    const thisMonthPrefix = `${todayYear}-${String(todayMonth + 1).padStart(2,'0')}`;
     const alreadyPosted = transactions.some(tx => {
-      const txDate = new Date(tx.date);
       return (
         tx.source === 'subscription' &&
         tx.subscriptionId === sub.id &&
-        txDate.getFullYear() === todayYear &&
-        txDate.getMonth() === todayMonth
+        tx.date && tx.date.startsWith(thisMonthPrefix)
       );
     });
 
@@ -2082,18 +2089,7 @@ function renderSettingsCards() {
   }).join('');
 }
 
-function openAddCardModal() {
-  document.getElementById('addCardModal').classList.add('open');
-  document.getElementById('newCardIssuer').value = '';
-  document.getElementById('newCardName').innerHTML = '<option value="">Select or type card name...</option>';
-  document.getElementById('newCardCustomName').value = '';
-  document.getElementById('newCardLast4').value = '';
-  newCardType = 'credit';
-  newCardColor = '#6c5ce7';
-  document.getElementById('cardTypeCredit').classList.add('selected');
-  document.getElementById('cardTypeDebit').classList.remove('selected');
-  renderColorPicker();
-}
+// openAddCardModal defined below with full field reset (limit, payDay)
 
 function onCardIssuerChange() {
   const issuer = document.getElementById('newCardIssuer').value;
@@ -2122,33 +2118,7 @@ function renderColorPicker() {
   ).join('');
 }
 
-function openEditCardModal(cardId) {
-  const card = CARDS.find(c => c.id === cardId);
-  if (!card) return;
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay open';
-  overlay.id = 'editCardOverlay';
-  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-  overlay.innerHTML = `
-    <div class="modal" style="padding-bottom:calc(20px + var(--safe-bottom))">
-      <div class="modal-top">
-        <h2>Edit Card</h2>
-        <button class="modal-close" onclick="document.getElementById('editCardOverlay').remove()">✕</button>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
-        <div style="width:14px;height:44px;border-radius:4px;background:${card.color}"></div>
-        <div>
-          <div style="font-size:16px;font-weight:600">${card.name}</div>
-          <div style="font-size:13px;color:var(--text-dim)">•••• ${card.last4} · ${card.type||'credit'}</div>
-        </div>
-      </div>
-      <div style="font-size:13px;color:var(--text-dim);margin-bottom:20px">
-        ${getCardRewardsHTML(card)}
-      </div>
-      <button class="submit-btn danger" style="font-size:14px;padding:12px" onclick="removeCard('${cardId}')">Remove Card</button>
-    </div>`;
-  document.body.appendChild(overlay);
-}
+// openEditCardModal defined below with full editing (name, limit, payDay, color, payments)
 
 function getCardRewardsHTML(card) {
   const db = CARD_DATABASE[card.issuer]?.cards?.[card.name];
@@ -2295,10 +2265,10 @@ function renderSubscriptions() {
     const cat = CATEGORIES.find(c => c.id === sub.category);
     // Check if already auto-posted this month
     const now = new Date();
+    const nowMonthPrefix = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
     const postedThisMonth = transactions.some(tx =>
       tx.source === 'subscription' && tx.subscriptionId === sub.id &&
-      new Date(tx.date).getFullYear() === now.getFullYear() &&
-      new Date(tx.date).getMonth() === now.getMonth()
+      tx.date && tx.date.startsWith(nowMonthPrefix)
     );
     const dayLabel = sub.debitDay ? ` · Bills on ${sub.debitDay}${['st','nd','rd'][((sub.debitDay+90)%100-10)%10-1]||'th'}` : '';
     return `<div class="sub-card">
@@ -2481,9 +2451,12 @@ function goToCurrentMonth() {
 // FILTERING
 // ============================================================
 function getMonthTransactions(year, month, card) {
+  // Build "YYYY-MM" prefix for the target month to compare directly against tx.date strings.
+  // This avoids new Date(dateString) which parses as UTC and causes off-by-one month errors
+  // in timezones behind UTC (e.g. "2026-04-01" UTC = March 31 in US timezones).
+  const monthStr = `${year}-${String(month + 1).padStart(2, '0')}`;
   return transactions.filter(tx => {
-    const d = new Date(tx.date);
-    return d.getMonth() === month && d.getFullYear() === year && (!card || card === 'all' || tx.card === card);
+    return tx.date && tx.date.startsWith(monthStr) && (!card || card === 'all' || tx.card === card);
   }).sort((a,b) => b.date.localeCompare(a.date) || b.time.localeCompare(a.time));
 }
 function getFiltered() { return getMonthTransactions(currentYear, currentMonth, selectedCard); }
@@ -2742,7 +2715,8 @@ function saveTransaction() {
   if(!amount||!merchant||!date||!selectedCardInModal||!selectedCatInModal){alert('Please fill in all fields');return;}
   transactions.push({id:nextId++,amount,merchant,card:selectedCardInModal,category:selectedCatInModal,date,time,source:'manual'});
   saveToStorage(); closeModal('addModal');
-  const d=new Date(date); currentMonth=d.getMonth(); currentYear=d.getFullYear();
+  // Parse date string directly to avoid UTC timezone offset issue
+  const parts=date.split('-'); currentYear=parseInt(parts[0]); currentMonth=parseInt(parts[1])-1;
   updateMonthLabel(); renderAll();
 }
 
@@ -2955,7 +2929,7 @@ function saveIncome(){
   if(!amount||amount<=0||!date){alert('Please enter amount and date');return;}
   // For recurring entries, store payDay
   let payDay=0, recurring=false;
-  if(frequency==='monthly'){recurring=true;payDay=new Date(date).getDate();}
+  if(frequency==='monthly'){recurring=true;payDay=new Date(date + 'T12:00:00').getDate();}
   else if(frequency==='biweekly'||frequency==='weekly'){recurring=true;payDay=0;}// use date as anchor
   incomeEntries.push({id:nextIncomeId++,amount,source,date,note,frequency,recurring,payDay});
   saveToStorage(); closeModal('addIncomeModal'); renderFinanceHub();
@@ -2966,15 +2940,15 @@ function deleteIncome(id){incomeEntries=incomeEntries.filter(e=>e.id!==id);saveT
 
 function getMonthIncome(year,month){
   const now=new Date();
+  const monthPrefix = `${year}-${String(month+1).padStart(2,'0')}`;
   return incomeEntries.filter(e=>{
-    const d=new Date(e.date);
-    if(e.frequency==='once') return d.getFullYear()===year&&d.getMonth()===month;
+    if(e.frequency==='once') return e.date && e.date.startsWith(monthPrefix);
     if(e.frequency==='monthly') return true; // shows every month
     if(e.frequency==='biweekly'||e.frequency==='weekly'){
       // Count occurrences in this month
       return true; // simplified: always show if recurring
     }
-    return d.getFullYear()===year&&d.getMonth()===month;
+    return e.date && e.date.startsWith(monthPrefix);
   }).reduce((s,e)=>{
     if(e.frequency==='biweekly') return s+(e.amount*2.17); // avg biweekly in a month
     if(e.frequency==='weekly') return s+(e.amount*4.33);
@@ -2985,11 +2959,13 @@ function getMonthIncome(year,month){
 // Get recurring income entries for calendar display
 function getIncomeOccurrencesInMonth(year,month){
   const daysInMonth=new Date(year,month+1,0).getDate();
+  const monthPrefix = `${year}-${String(month+1).padStart(2,'0')}`;
   const result=[]; // [{day, label, amount}]
   incomeEntries.forEach(e=>{
-    const startDate=new Date(e.date);
+    // Parse date with T12:00:00 to avoid UTC offset issues
+    const startDate=new Date(e.date + 'T12:00:00');
     if(e.frequency==='once'){
-      if(startDate.getFullYear()===year&&startDate.getMonth()===month)
+      if(e.date && e.date.startsWith(monthPrefix))
         result.push({day:startDate.getDate(),label:INCOME_LABELS[e.source]||'Income',amount:e.amount});
     } else if(e.frequency==='monthly'){
       const day=Math.min(e.payDay||startDate.getDate(),daysInMonth);
@@ -3041,7 +3017,8 @@ function renderFinanceHub(){
   if(incEl){
     const entries=incomeEntries.filter(e=>{
       if(e.recurring)return true;
-      const d=new Date(e.date);return d.getFullYear()===currentYear&&d.getMonth()===currentMonth;
+      const incMonthPrefix = `${currentYear}-${String(currentMonth+1).padStart(2,'0')}`;
+      return e.date && e.date.startsWith(incMonthPrefix);
     });
     if(!entries.length){incEl.innerHTML=`<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius-sm)">No income logged. Tap + to add.</div>`;}
     else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+$${e.amount.toLocaleString('en-US',{minimumFractionDigits:2})}</div><span class="income-del" onclick="deleteIncome(${e.id})">✕</span></div>`).join('');
@@ -3089,7 +3066,11 @@ function getEstimatedBalance(cardId) {
   const statBal = b.statementBalance || 0;
   const lastUpdated = b.lastUpdated || null;
 
-  // All transactions on this card (across all months)
+  // Current month prefix for filtering
+  const now = new Date();
+  const curMonthStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+  // All transactions on this card
   const allTx = transactions.filter(tx => tx.card === cardId);
 
   // All logged payments for this card
@@ -3099,14 +3080,32 @@ function getEstimatedBalance(cardId) {
   let payments = 0;
 
   if (statBal > 0 && lastUpdated) {
-    // Anchored to statement date — count everything on/after that date
-    charges = allTx.filter(tx => tx.date >= lastUpdated).reduce((s, tx) => s + tx.amount, 0);
-    payments = allPayments.filter(p => p.date >= lastUpdated).reduce((s, p) => s + p.amount, 0);
+    // Check if lastUpdated is in the current month
+    const updatedInCurrentMonth = lastUpdated.startsWith(curMonthStr);
+
+    if (updatedInCurrentMonth) {
+      // Statement was logged this month — normal behavior
+      charges = allTx.filter(tx => tx.date >= lastUpdated).reduce((s, tx) => s + tx.amount, 0);
+      payments = allPayments.filter(p => p.date >= lastUpdated).reduce((s, p) => s + p.amount, 0);
+    } else {
+      // Statement was logged in a PREVIOUS month — roll forward:
+      // 1. Compute what the balance was at end of last month (stat + old charges - old payments)
+      const oldCharges = allTx.filter(tx => tx.date >= lastUpdated && !tx.date.startsWith(curMonthStr)).reduce((s, tx) => s + tx.amount, 0);
+      const oldPayments = allPayments.filter(p => p.date >= lastUpdated && !p.date.startsWith(curMonthStr)).reduce((s, p) => s + p.amount, 0);
+      const rolledBalance = Math.max(statBal + oldCharges - oldPayments, 0);
+
+      // 2. Only show THIS month's charges and payments going forward
+      charges = allTx.filter(tx => tx.date.startsWith(curMonthStr)).reduce((s, tx) => s + tx.amount, 0);
+      payments = allPayments.filter(p => p.date.startsWith(curMonthStr)).reduce((s, p) => s + p.amount, 0);
+
+      // Use rolled balance as the effective statement balance
+      const estimated = Math.max(rolledBalance + charges - payments, 0);
+      return { statBal: rolledBalance, charges, payments, estimated, lastUpdated: curMonthStr + '-01' };
+    }
   } else {
-    // No statement balance logged — sum ALL transactions on this card across all months
-    // minus ALL payments ever made, so past months' charges don't disappear
-    charges = allTx.reduce((s, tx) => s + tx.amount, 0);
-    payments = allPayments.reduce((s, p) => s + p.amount, 0);
+    // No statement balance logged — only count current month
+    charges = allTx.filter(tx => tx.date.startsWith(curMonthStr)).reduce((s, tx) => s + tx.amount, 0);
+    payments = allPayments.filter(p => p.date.startsWith(curMonthStr)).reduce((s, p) => s + p.amount, 0);
   }
 
   const estimated = Math.max(statBal + charges - payments, 0);
@@ -3266,7 +3265,7 @@ function renderGoals(){
     const pct=g.target>0?Math.min(((g.savedSoFar||0)/g.target)*100,100):0;
     const remaining=g.target-(g.savedSoFar||0);
     let daysLeft=null,perMonth=null,onTrack=null;
-    if(g.deadline){const dead=new Date(g.deadline);const tod=new Date();daysLeft=Math.max(Math.ceil((dead-tod)/86400000),0);const monthsLeft=Math.max(daysLeft/30.4,0.1);perMonth=remaining/monthsLeft;const avail=Math.max(getMonthIncome(currentYear,currentMonth)-getMonthTransactions(currentYear,currentMonth,'all').reduce((s,tx)=>s+tx.amount,0),0);onTrack=avail>=perMonth;}
+    if(g.deadline){const dead=new Date(g.deadline+'T23:59:59');const tod=new Date();daysLeft=Math.max(Math.ceil((dead-tod)/86400000),0);const monthsLeft=Math.max(daysLeft/30.4,0.1);perMonth=remaining/monthsLeft;const avail=Math.max(getMonthIncome(currentYear,currentMonth)-getMonthTransactions(currentYear,currentMonth,'all').reduce((s,tx)=>s+tx.amount,0),0);onTrack=avail>=perMonth;}
     return `<div class="goal-card"><div class="goal-header"><div class="goal-icon-wrap" style="background:${g.color}22">${g.icon||'🎯'}</div><div style="flex:1"><div class="goal-name">${g.name}</div><div class="goal-deadline">${g.deadline?`📅 ${new Date(g.deadline+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft!==null?' · '+daysLeft+'d':''}`:' No deadline'}</div></div><div class="goal-actions"><button class="goal-action-btn" onclick="addToGoal(${g.id})">+ Add</button><button class="goal-action-btn" onclick="openGoalModal(${g.id})">Edit</button><button class="goal-action-btn" style="color:var(--red)" onclick="deleteGoal(${g.id})">✕</button></div></div><div class="goal-progress-row"><span style="font-weight:600">$${(g.savedSoFar||0).toLocaleString('en-US',{minimumFractionDigits:0})} saved</span><span>of $${g.target.toLocaleString()} · ${pct.toFixed(0)}%</span></div><div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%;background:${g.color}"></div></div><div class="goal-stats"><div class="goal-stat"><div class="goal-stat-val" style="color:var(--red)">$${remaining.toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="goal-stat-lbl">Remaining</div></div><div class="goal-stat"><div class="goal-stat-val" style="color:var(--blue)">${perMonth?'$'+perMonth.toFixed(0):'—'}</div><div class="goal-stat-lbl">Per Month</div></div><div class="goal-stat"><div class="goal-stat-val">${onTrack===null?'—':onTrack?'✅':'⚠️'}</div><div class="goal-stat-lbl">On Track</div></div></div></div>`;
   }).join('');
   renderPayYourself();
@@ -3335,8 +3334,9 @@ function renderDebtProjection(){
   const totalMonthlyInterest=debts.reduce((s,d)=>s+(d.statementBalance*(d.apr/100/12)),0);
   stratEl.innerHTML=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:10px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:12px"><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Debt</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">$${totalDebt.toLocaleString('en-US',{minimumFractionDigits:0})}</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Min Payments</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--amber);margin-top:3px">$${totalMinPay.toFixed(0)}/mo</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Mo. Interest</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">$${totalMonthlyInterest.toFixed(0)}</div></div></div><div style="font-size:13px;font-weight:600;margin-bottom:9px">Payoff Strategy</div><div class="strategy-toggle"><div class="strategy-btn ${debtStrategy==='avalanche'?'active':''}" id="strategy-avalanche" onclick="setDebtStrategy('avalanche')">🔥 Avalanche<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Highest APR first</div></div><div class="strategy-btn ${debtStrategy==='snowball'?'active':''}" id="strategy-snowball" onclick="setDebtStrategy('snowball')">❄️ Snowball<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Smallest balance first</div></div></div></div>`;
   const sorted=[...debts].sort((a,b)=>debtStrategy==='avalanche'?b.apr-a.apr:a.statementBalance-b.statementBalance);
-  const monthlyIncome=getMonthIncome(currentYear,currentMonth);
-  const monthlySpent=getMonthTransactions(currentYear,currentMonth,'all').reduce((s,tx)=>s+tx.amount,0);
+  const _now=new Date();const _rYear=_now.getFullYear();const _rMonth=_now.getMonth();
+  const monthlyIncome=getMonthIncome(_rYear,_rMonth);
+  const monthlySpent=getMonthTransactions(_rYear,_rMonth,'all').reduce((s,tx)=>s+tx.amount,0);
   const extraPayment=Math.max(monthlyIncome-monthlySpent-totalMinPay,0);
   const totalPayment=totalMinPay+extraPayment;
   let balances=sorted.map(d=>({...d,bal:d.statementBalance}));
@@ -3496,7 +3496,7 @@ function renderPaymentsPage() {
                 <div style="font-size:11px;color:var(--text-dim);margin-top:1px">${p.date} · ${p.source==='gmail'?'Auto from Gmail':p.source==='manual'?'Manual':'Logged'}${p.note?' · '+p.note:''}</div>
               </div>
             </div>
-            <button onclick="deletePayment('${card.id}',${i})" style="color:var(--text-muted);background:none;border:none;cursor:pointer;font-size:15px;padding:4px 6px">✕</button>
+            <button onclick="deletePayment('${card.id}','${p.date}',${p.amount})" style="color:var(--text-muted);background:none;border:none;cursor:pointer;font-size:15px;padding:4px 6px">✕</button>
           </div>`).join('')
       }
     </div>`;
@@ -3535,10 +3535,11 @@ function saveManualPayment() {
   renderFinCardBalances(); // refresh Finance Hub card balances if visible
 }
 
-function deletePayment(cardId, index) {
+function deletePayment(cardId, pDate, pAmount) {
   if (!confirm('Remove this payment record?')) return;
   if (cardPayments[cardId]) {
-    cardPayments[cardId].splice(index, 1);
+    const idx = cardPayments[cardId].findIndex(p => p.date === pDate && Math.abs(p.amount - pAmount) < 0.01);
+    if (idx !== -1) cardPayments[cardId].splice(idx, 1);
     saveToStorage();
     renderPaymentsPage();
     showSyncBar('success', '🗑️', 'Payment removed');
