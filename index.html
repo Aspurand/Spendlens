@@ -58,16 +58,16 @@
 }
 
 [data-theme="dark"] {
-  --bg: #14120F;
-  --bg-card: #1D1A15;
-  --bg-card-hover: #24201A;
-  --bg-input: #1D1A15;
-  --bg-elev: #221E18;
-  --border: #302A22;
-  --border-strong: #4A4133;
-  --text: #F2EDE2;
-  --text-dim: #A8A092;
-  --text-muted: #6A6458;
+  --bg: #101011;
+  --bg-card: #1A1A1C;
+  --bg-card-hover: #232325;
+  --bg-input: #1A1A1C;
+  --bg-elev: #1F1F21;
+  --border: #2A2A2C;
+  --border-strong: #3C3C3E;
+  --text: #F2F0EC;
+  --text-dim: #A5A5A7;
+  --text-muted: #6A6A6C;
   --accent: #D97A52;
   --accent-ink: #F4B89A;
   --accent-soft: rgba(217,122,82,0.14);
@@ -3970,7 +3970,7 @@ const SPEND_TWEAKS = /*EDITMODE-BEGIN*/{
   const saved = localStorage.getItem('spendlens_theme');
   const theme = saved || SPEND_TWEAKS.theme || 'light';
   document.body.dataset.theme = theme;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#14120F' : '#F6F2EA');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#101011' : '#F6F2EA');
 })();
 
 // Update iOS clock
@@ -4011,7 +4011,7 @@ const SPEND_TWEAKS = /*EDITMODE-BEGIN*/{
     const v = themeSelect.value;
     document.body.dataset.theme = v;
     localStorage.setItem('spendlens_theme', v);
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', v === 'dark' ? '#14120F' : '#F6F2EA');
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', v === 'dark' ? '#101011' : '#F6F2EA');
     try {
       window.parent.postMessage({type: '__edit_mode_set_keys', edits: {theme: v}}, '*');
     } catch(e) {}
@@ -5561,8 +5561,43 @@ function renderTrendChart() {
   }
   if (trendView === 'overall') {
     const data = months.map(m => getMonthTransactions(m.year,m.month,'all').reduce((s,tx) => s+tx.amount,0));
-    trendChart = new Chart(ctx,{type:'bar',data:{labels:months.map(m=>m.label),datasets:[{data,backgroundColor:months.map((m)=>(m.month===currentMonth&&m.year===currentYear)?'rgba(108,92,231,0.8)':'rgba(108,92,231,0.3)'),borderColor:'#6c5ce7',borderWidth:1,borderRadius:8}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:12,family:'DM Sans'}}},y:{grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:11,family:'JetBrains Mono'},callback:v=>'$'+v.toLocaleString()}}}}});
+    const accent = (getComputedStyle(document.body).getPropertyValue('--accent') || '#D97A52').trim();
+    // Build a vertical gradient for the area fill
+    const h = ctx.canvas.clientHeight || 200;
+    const gradient = ctx.createLinearGradient(0, 0, 0, h);
+    gradient.addColorStop(0, accent + '55');
+    gradient.addColorStop(1, accent + '00');
+    // Highlight the current month with a larger point
+    const isCurrent = m => m.month === currentMonth && m.year === currentYear;
+    const pointRadii = months.map(m => isCurrent(m) ? 6 : 3);
+    const pointBg    = months.map(m => isCurrent(m) ? accent : accent + '88');
+    trendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: months.map(m => m.label),
+        datasets: [{
+          data,
+          borderColor: accent,
+          backgroundColor: gradient,
+          fill: true,
+          tension: 0.35,
+          borderWidth: 2.5,
+          pointBackgroundColor: pointBg,
+          pointBorderColor: accent,
+          pointBorderWidth: 2,
+          pointRadius: pointRadii,
+          pointHoverRadius: 7,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 12, family: 'DM Sans' } } },
+          y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 11, family: 'JetBrains Mono' }, callback: v => '$' + v.toLocaleString() } }
+        }
+      }
+    });
   } else {
     const datasets = CATEGORIES.map(cat => ({label:cat.name,backgroundColor:cat.color+'99',borderColor:cat.color,borderWidth:1,borderRadius:4,
       data:months.map(m => getMonthTransactions(m.year,m.month,'all').filter(tx=>tx.category===cat.id).reduce((s,tx)=>s+tx.amount,0))
@@ -5586,8 +5621,30 @@ function renderDailyChart(f) {
   const grouped = {};
   f.forEach(tx => { const d = tx.date.substring(8); grouped[d] = (grouped[d]||0)+tx.amount; });
   const labels = Object.keys(grouped).sort();
-  dailyChart = new Chart(ctx,{type:'bar',data:{labels,datasets:[{data:labels.map(l=>grouped[l]),backgroundColor:'rgba(108,92,231,0.5)',borderColor:'#6c5ce7',borderWidth:1,borderRadius:4}]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:10,family:'JetBrains Mono'}}},y:{grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:10,family:'JetBrains Mono'},callback:v=>'$'+v}}}}});
+  const accent = (getComputedStyle(document.body).getPropertyValue('--accent') || '#D97A52').trim();
+  const h = ctx.canvas.clientHeight || 160;
+  const gradient = ctx.createLinearGradient(0, 0, 0, h);
+  gradient.addColorStop(0, accent + '55');
+  gradient.addColorStop(1, accent + '00');
+  dailyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: labels.map(l => grouped[l]),
+        borderColor: accent,
+        backgroundColor: gradient,
+        fill: true,
+        tension: 0.3,
+        borderWidth: 2,
+        pointBackgroundColor: accent,
+        pointBorderColor: accent,
+        pointRadius: 2.5,
+        pointHoverRadius: 5,
+      }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' } } }, y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' }, callback: v => '$' + v } } } }
+  });
 }
 
 function renderCategories(f) {
@@ -6800,7 +6857,7 @@ function toggleTheme() {
   document.body.dataset.theme = next;
   localStorage.setItem('spendlens_theme', next);
   document.querySelector('meta[name="theme-color"]')?.setAttribute(
-    'content', next === 'dark' ? '#14120F' : '#F6F2EA'
+    'content', next === 'dark' ? '#101011' : '#F6F2EA'
   );
   // sync tweak panel select if open
   const sel = document.getElementById('tweakTheme');
