@@ -11,6 +11,47 @@
 <meta name="apple-mobile-web-app-title" content="SpendLens">
 <meta name="theme-color" content="#F6F2EA">
 <title>SpendLens</title>
+<script>
+// Mobile debug overlay — activate with ?debug=1 in URL.
+// Captures console.log / console.error and shows them in a scrollable panel.
+(function(){
+  if (!/[?&]debug=1/.test(location.search)) return;
+  const panel = document.createElement('div');
+  panel.id = '__debug_panel__';
+  panel.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;'
+    + 'background:rgba(0,0,0,0.92);color:#0f0;font:11px/1.3 Menlo,monospace;'
+    + 'padding:8px;max-height:50vh;overflow-y:auto;white-space:pre-wrap;'
+    + 'border-top:2px solid #0f0';
+  const hdr = document.createElement('div');
+  hdr.style.cssText = 'position:sticky;top:0;background:#111;padding:4px;border-bottom:1px solid #444;display:flex;gap:8px';
+  hdr.innerHTML = '<strong>debug</strong>'
+    + '<button onclick="document.getElementById(\'__debug_log__\').innerHTML=\'\'" style="background:#333;color:#fff;border:0;padding:2px 6px;border-radius:3px">clear</button>'
+    + '<button onclick="document.getElementById(\'__debug_panel__\').style.display=\'none\'" style="background:#333;color:#fff;border:0;padding:2px 6px;border-radius:3px">hide</button>';
+  const log = document.createElement('div');
+  log.id = '__debug_log__';
+  panel.appendChild(hdr);
+  panel.appendChild(log);
+  document.addEventListener('DOMContentLoaded', () => document.body.appendChild(panel));
+  function append(kind, args) {
+    const line = document.createElement('div');
+    line.style.color = kind === 'error' ? '#f66' : kind === 'warn' ? '#fc6' : '#6f6';
+    const text = [...args].map(a => {
+      if (a instanceof Error) return a.message + (a.stack ? '\n' + a.stack.split('\n').slice(0,3).join('\n') : '');
+      if (typeof a === 'object') { try { return JSON.stringify(a); } catch { return String(a); } }
+      return String(a);
+    }).join(' ');
+    line.textContent = '[' + new Date().toISOString().slice(11,19) + '] ' + text;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+  const origLog = console.log, origErr = console.error, origWarn = console.warn;
+  console.log = function(...a){ append('log', a); origLog.apply(console, a); };
+  console.error = function(...a){ append('error', a); origErr.apply(console, a); };
+  console.warn = function(...a){ append('warn', a); origWarn.apply(console, a); };
+  window.addEventListener('error', e => append('error', ['window.onerror:', e.message, e.filename+':'+e.lineno]));
+  window.addEventListener('unhandledrejection', e => append('error', ['unhandled:', e.reason?.message || e.reason]));
+})();
+</script>
 <link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiU3BlbmRMZW5zIiwic2hvcnRfbmFtZSI6IlNwZW5kTGVucyIsInN0YXJ0X3VybCI6Ii4iLCJkaXNwbGF5Ijoic3RhbmRhbG9uZSIsImJhY2tncm91bmRfY29sb3IiOiIjRjZGMkVBIiwidGhlbWVfY29sb3IiOiIjRjZGMkVBIn0=">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -4341,15 +4382,37 @@ function saveToStorage() {
 // ============================================================
 // Deletes queued between mutations and the next flush. Upserts handle
 // adds/edits; deletes need explicit row-level DELETE calls.
-const cloudDeletes = {
-  transactions: [], cards: [], subscriptions: [], card_payments: [],
-  income_entries: [], savings_goals: [], sync_history: [],
-  card_balances: [],     // [{card_id}]
-  budgets: [],           // [{key}]
-  merchant_rules: [],    // [{merchant_key}]
-  processed_emails: [],  // [{email_id, kind}]
-};
+// cloudDeletes — queued row IDs for DELETE on next flush.
+// Persisted to localStorage so deletes survive tab close / app restart.
+const CLOUD_DELETES_KEY = 'spendlens_cloud_deletes';
+function _emptyCloudDeletes() {
+  return {
+    transactions: [], cards: [], subscriptions: [], card_payments: [],
+    income_entries: [], savings_goals: [], sync_history: [],
+    card_balances: [],     // [{card_id}]
+    budgets: [],           // [{key}]
+    merchant_rules: [],    // [{merchant_key}]
+    processed_emails: [],  // [{email_id, kind}]
+  };
+}
+let cloudDeletes = _emptyCloudDeletes();
+try {
+  const saved = localStorage.getItem(CLOUD_DELETES_KEY);
+  if (saved) {
+    const parsed = JSON.parse(saved);
+    // Merge into defaults so new keys in future versions still exist
+    cloudDeletes = { ..._emptyCloudDeletes(), ...parsed };
+  }
+} catch (e) { console.error('[cloudDeletes] load failed:', e); }
+function persistCloudDeletes() {
+  try { localStorage.setItem(CLOUD_DELETES_KEY, JSON.stringify(cloudDeletes)); }
+  catch (e) { console.error('[cloudDeletes] persist failed:', e); }
+}
+function hasPendingDeletes() {
+  return Object.values(cloudDeletes).some(arr => arr && arr.length > 0);
+}
 let cloudFlushTimer = null;
+let pendingFlushRequest = false;  // true if a save happened before sign-in
 
 function initSupabase() {
   if (!window.supabase) return false;
@@ -4464,6 +4527,23 @@ async function onSupabaseSignIn(session) {
   // Now that we have authoritative state, auto-post any due subscription charges
   autoPostSubscriptions();
   renderAll();
+
+  // CRITICAL: flush any pending work from before sign-in (offline edits,
+  // queued deletes from previous session, saves that hit scheduleFlush
+  // before currentUserId was set, etc).
+  if (pendingFlushRequest || hasPendingDeletes()) {
+    console.log('[signin] pending work detected, flushing now');
+    pendingFlushRequest = false;
+    try {
+      await flushToCloud();
+      persistCloudDeletes();
+      updateSyncStatus('synced');
+      console.log('[signin] flush complete');
+    } catch (e) {
+      console.error('[signin] flush failed:', e);
+      updateSyncStatus('error', e.message);
+    }
+  }
 
   // Auto-sync Gmail on load if we have a valid token
   if (gmailAccessToken) {
@@ -4610,40 +4690,71 @@ async function forceCloudSync() {
   }
   if (cloudFlushTimer) { clearTimeout(cloudFlushTimer); cloudFlushTimer = null; }
   showSyncBar('syncing', '☁️', 'Syncing to cloud…');
+  console.log('[forceSync] starting');
   try {
-    await flushToCloud();
+    // Hard 30s timeout — if the flush hangs, we'd rather error than spin forever
+    await Promise.race([
+      flushToCloud(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Sync timed out after 30s — check internet or session')), 30000))
+    ]);
+    persistCloudDeletes();
     showSyncBar('success', '✅', 'Cloud sync complete');
+    console.log('[forceSync] success');
   } catch (e) {
-    console.error('forceCloudSync failed:', e);
-    showSyncBar('error', '❌', 'Sync failed: ' + (e.message || e).slice(0, 80));
+    console.error('[forceSync] failed:', e);
+    showSyncBar('error', '❌', 'Sync failed: ' + (e.message || e).toString().slice(0, 120));
   }
 }
 
 function scheduleFlush(delayMs = 1500) {
-  if (!supabaseClient || !currentUserId) return;
+  // Always persist cloudDeletes so they survive tab close / PWA sleep
+  persistCloudDeletes();
+  if (!supabaseClient || !currentUserId) {
+    // Remember that we have unflushed work; onSupabaseSignIn will flush
+    pendingFlushRequest = true;
+    console.log('[schedule] not signed in yet, marked pending');
+    return;
+  }
   if (cloudFlushTimer) clearTimeout(cloudFlushTimer);
   cloudFlushTimer = setTimeout(() => {
     cloudFlushTimer = null;
-    flushToCloud().catch(e => console.error('flushToCloud:', e));
+    flushToCloud()
+      .then(() => { persistCloudDeletes(); updateSyncStatus('synced'); })
+      .catch(e => { console.error('flushToCloud:', e); updateSyncStatus('error', e.message || String(e)); });
   }, delayMs);
+  updateSyncStatus('pending');
 }
 
 async function flushToCloud() {
-  if (!supabaseClient || !currentUserId) return;
+  if (!supabaseClient || !currentUserId) { console.log('[flush] aborted: no client or user'); return; }
   const uid = currentUserId;
+  console.log('[flush] starting for user:', uid);
+  console.log('[flush] in-memory state:',
+    'cards=' + CARDS.length,
+    'tx=' + transactions.length,
+    'subs=' + subscriptions.length,
+    'income=' + incomeEntries.length,
+    'goals=' + savingsGoals.length,
+    'budgets=' + Object.keys(budgets).length,
+    'deletes.tx=' + cloudDeletes.transactions.length,
+    'deletes.cards=' + cloudDeletes.cards.length
+  );
 
   // Helper: upsert in chunks of CHUNK_SIZE, awaiting each chunk
   const CHUNK_SIZE = 500;
   async function upsertChunked(table, rows, opts) {
-    if (!rows || !rows.length) return;
+    if (!rows || !rows.length) { console.log('  [upsert] ' + table + ': 0 rows (skip)'); return; }
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
       const slice = rows.slice(i, i + CHUNK_SIZE);
+      console.log('  [upsert] ' + table + ': ' + slice.length + ' rows (chunk ' + i + ')');
       const { error } = await supabaseClient.from(table).upsert(slice, opts);
       if (error) {
+        console.error('  [upsert] ' + table + ' FAILED:', error);
         const e = new Error(`upsert ${table} (chunk ${i}-${i+slice.length}): ${error.message}`);
         e.cause = error;
         throw e;
       }
+      console.log('  [upsert] ' + table + ' OK');
     }
   }
 
@@ -4668,11 +4779,13 @@ async function flushToCloud() {
   // don't reference a card about to be deleted mid-batch.
   const dC = take('cards');          if (dC.length) dJobs.push(supabaseClient.from('cards').delete().in('id', dC));
   if (dJobs.length) {
+    console.log('[flush] running', dJobs.length, 'delete job(s)');
     const delResults = await Promise.all(dJobs);
     const delErrs = delResults.filter(r => r && r.error);
     if (delErrs.length) {
-      delErrs.forEach(r => console.error('delete error:', r.error));
+      delErrs.forEach(r => console.error('[flush] delete error:', r.error));
     }
+    console.log('[flush] deletes complete,', delErrs.length, 'errors');
   }
 
   // 2) Upserts — TIERED so FK parents land before FK children.
@@ -4711,7 +4824,9 @@ async function flushToCloud() {
   processedEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'transaction' }));
   processedPaymentEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'payment' }));
 
+  console.log('[flush] Tier A: cards (' + cardRows.length + ' rows)');
   await upsertChunked('cards', cardRows);
+  console.log('[flush] Tier A cards done, now parallel misc');
   await Promise.all([
     upsertChunked('income_entries', incRows),
     upsertChunked('savings_goals', goalRows),
@@ -4726,6 +4841,7 @@ async function flushToCloud() {
       yesterday_dismissed_date: yesterdayDismissedDate || null,
     }).then(r => { if (r.error) throw new Error('user_preferences: ' + r.error.message); }),
   ]);
+  console.log('[flush] Tier A complete');
 
   // ── TIER B ─────────────────────────────────────────────────
   const subRows = subscriptions.map(s => ({
@@ -4750,11 +4866,13 @@ async function flushToCloud() {
       });
     });
   });
+  console.log('[flush] Tier B: subs=' + subRows.length + ', bals=' + balRows.length + ', pays=' + payRows.length);
   await Promise.all([
     upsertChunked('subscriptions', subRows),
     upsertChunked('card_balances', balRows, { onConflict: 'user_id,card_id' }),
     upsertChunked('card_payments', payRows),
   ]);
+  console.log('[flush] Tier B complete');
 
   // ── TIER C ─────────────────────────────────────────────────
   const txRows = transactions.map(t => ({
@@ -4763,7 +4881,9 @@ async function flushToCloud() {
     tx_date: t.date, tx_time: t.time || '12:00',
     source: t.source || 'manual', email_id: t.emailId || null,
   }));
+  console.log('[flush] Tier C: transactions (' + txRows.length + ' rows)');
   await upsertChunked('transactions', txRows);
+  console.log('[flush] Tier C complete — flush SUCCESS');
 }
 
 // ─── Dedupe helper ──────────────────────────────────────────
@@ -5479,11 +5599,18 @@ function reassignCategory(txId, newCatId) {
 
 function deleteTransaction(txId) {
   if (!confirm('Delete this transaction?')) return;
+  console.log('[delete] starting for id:', txId);
+  const before = transactions.length;
   transactions = transactions.filter(t => t.id !== txId);
+  const after = transactions.length;
+  console.log('[delete] removed from memory:', before, '→', after);
   cloudDeletes.transactions.push(txId);
+  console.log('[delete] queued to cloudDeletes.transactions, queue size:', cloudDeletes.transactions.length);
   saveToStorage();
+  console.log('[delete] saveToStorage called, scheduleFlush should have fired');
   document.getElementById('reassignOverlay')?.remove();
   renderAll();
+  console.log('[delete] done');
 }
 
 // ============================================================
@@ -5534,6 +5661,20 @@ function showSyncBar(type, icon, msg) {
   if (type === 'success') setTimeout(hideSyncBar, 5000);
 }
 function hideSyncBar() { document.getElementById('syncBar').classList.remove('visible'); }
+
+// Lightweight status indicator — does NOT hijack the sync bar for routine
+// background flushes (those should be silent). Only surfaces errors.
+function updateSyncStatus(state, msg) {
+  // state: 'pending' | 'synced' | 'error'
+  if (state === 'error') {
+    showSyncBar('error', '⚠️', 'Cloud sync issue: ' + (msg || 'unknown').slice(0, 80));
+  } else if (state === 'synced') {
+    // Fade out any lingering error bar
+    const bar = document.getElementById('syncBar');
+    if (bar.classList.contains('error')) hideSyncBar();
+  }
+  // 'pending' is silent — don't nag user on every typed letter
+}
 
 function renderSettingsGmailSection() {
   const el = document.getElementById('settingsGmailSection');
@@ -7145,6 +7286,35 @@ window.addEventListener('load', () => {
     if (window.supabase) { clearInterval(check); initSupabase(); }
   }, 100);
   setTimeout(() => clearInterval(check), 10000); // give up after 10s (offline)
+});
+
+// Flush-on-close: when the user navigates away or closes the app, try to
+// push any pending work. Browsers limit what you can do here — we fire the
+// existing debounced flush synchronously (not awaiting) and rely on the
+// browser to let it complete. If it doesn't, the next sign-in will pick up
+// pendingFlushRequest from localStorage and re-flush.
+window.addEventListener('beforeunload', () => {
+  try {
+    if (supabaseClient && currentUserId && cloudFlushTimer) {
+      clearTimeout(cloudFlushTimer);
+      cloudFlushTimer = null;
+      flushToCloud().catch(() => {}); // best-effort, non-blocking
+    }
+    persistCloudDeletes();
+  } catch (e) {}
+});
+// visibilitychange catches iOS app suspension, which beforeunload doesn't
+window.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    try {
+      if (cloudFlushTimer) {
+        clearTimeout(cloudFlushTimer);
+        cloudFlushTimer = null;
+        if (supabaseClient && currentUserId) flushToCloud().catch(() => {});
+      }
+      persistCloudDeletes();
+    } catch (e) {}
+  }
 });
 
 init();
