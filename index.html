@@ -314,7 +314,7 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   max-width: 200px;
 }
-.sp-nav { flex: 1; overflow-y: auto; padding: 8px 0; }
+.sp-nav { flex: 1; overflow-y: auto; padding: 8px 0 calc(80px + var(--safe-bottom)); }
 .sp-nav::-webkit-scrollbar { display: none; }
 .sp-section {
   font-size: 10px; color: var(--text-muted);
@@ -898,7 +898,7 @@ body {
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   width: 100%;
   max-width: 500px;
-  padding: 0 18px 24px;
+  padding: 0 18px calc(24px + 80px + var(--safe-bottom));
   max-height: 92%;
   overflow-y: auto;
   animation: slideUp 0.32s cubic-bezier(0.4,0,0.2,1);
@@ -1997,8 +1997,8 @@ select.form-input {
   text-transform: uppercase;
 }
 
-/* Content area: leave room for tab bar (66px) */
-.page-scroll { padding-bottom: 80px !important; }
+/* Content area: leave room for tab bar (~64px) + home indicator on notched iPhones */
+.page-scroll { padding-bottom: calc(80px + var(--safe-bottom)) !important; }
 
 /* ════════════════════════════════════════════════
    HIDE tab-bar pages from the side panel "More" list
@@ -2836,6 +2836,7 @@ select.form-input {
 }
 #pageOptimizer .content,
 #pageSettings .content,
+#pageOptimizer .content,
 #pagePayments .content {
   padding: 0 16px 24px !important;
 }
@@ -4990,7 +4991,7 @@ function openReassignModal(txId) {
   overlay.id = 'reassignOverlay';
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
   overlay.innerHTML = `
-    <div class="modal" style="padding-bottom:calc(20px + var(--safe-bottom))">
+    <div class="modal" style="padding-bottom:calc(20px + 80px + var(--safe-bottom))">
       <div class="modal-top">
         <h2>Edit Transaction</h2>
         <button class="modal-close" onclick="document.getElementById('reassignOverlay').remove()">✕</button>
@@ -5972,7 +5973,7 @@ function openEditCardModal(cardId) {
   const overlay=document.createElement('div');
   overlay.className='modal-overlay open'; overlay.id='editCardOverlay';
   overlay.onclick=(e)=>{if(e.target===overlay)overlay.remove();};
-  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + var(--safe-bottom))">
+  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + 80px + var(--safe-bottom))">
     <div class="modal-top"><h2>Edit Card</h2><button class="modal-close" onclick="document.getElementById('editCardOverlay').remove()">✕</button></div>
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px"><div style="width:5px;height:44px;border-radius:3px;background:${card.color};flex-shrink:0"></div><div><div style="font-size:15px;font-weight:700">${card.name}</div><div style="font-size:12px;color:var(--text-dim)">•••• ${card.last4} · ${card.type||'credit'}</div></div></div>
     ${cardNames.length?`<div class="form-group"><label class="form-label">Card Product</label><select class="form-input" id="editCardName" onchange="refreshEditRewards('${cardId}')">${nameOpts}<option value="">Other</option></select></div>`:''}
@@ -6011,7 +6012,7 @@ function openLogPaymentModal(cardId){
   const card=CARDS.find(c=>c.id===cardId);if(!card)return;
   const overlay=document.createElement('div');overlay.className='modal-overlay open';overlay.id='logPaymentOverlay';
   overlay.onclick=(e)=>{if(e.target===overlay)overlay.remove();};
-  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + var(--safe-bottom))"><div class="modal-top"><h2>Log Payment</h2><button class="modal-close" onclick="document.getElementById('logPaymentOverlay').remove()">✕</button></div><div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Payment for <strong style="color:var(--text)">${card.name} ••••${card.last4}</strong></div><div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="paymentAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div><div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="paymentDate" value="${new Date().toISOString().split('T')[0]}"></div><button class="submit-btn green" onclick="savePayment('${cardId}','manual')">Save Payment</button></div>`;
+  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + 80px + var(--safe-bottom))"><div class="modal-top"><h2>Log Payment</h2><button class="modal-close" onclick="document.getElementById('logPaymentOverlay').remove()">✕</button></div><div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Payment for <strong style="color:var(--text)">${card.name} ••••${card.last4}</strong></div><div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="paymentAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div><div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="paymentDate" value="${new Date().toISOString().split('T')[0]}"></div><button class="submit-btn green" onclick="savePayment('${cardId}','manual')">Save Payment</button></div>`;
   document.body.appendChild(overlay);
 }
 function savePayment(cardId,source,amount=null,date=null){
@@ -6952,6 +6953,10 @@ function toggleTheme() {
     const dy = t.clientY - startY;
     const dt = Date.now() - startT;
 
+    // Never navigate pages while a modal or side panel is open — the swipe
+    // belongs to whatever is on top, not to the underlying tab.
+    if (document.querySelector('.modal-overlay.open, .side-overlay.open, #sidePanel.open')) return;
+
     // ignore slow, short, mostly-vertical or ambiguous drags
     if (Math.abs(dx) < 60) return;
     if (Math.abs(dy) > Math.abs(dx) * 0.7) return;
@@ -6960,7 +6965,7 @@ function toggleTheme() {
     // Skip if user was scrolling a horizontal element (charts, card scroll, tab scroll)
     const target = e.target;
     if (target && target.closest) {
-      const hScroll = target.closest('.cards-scroll, .scroll-h, canvas, input, textarea, select');
+      const hScroll = target.closest('.cards-scroll, .scroll-h, canvas, input, textarea, select, .modal, .side-panel');
       if (hScroll) return;
     }
 
