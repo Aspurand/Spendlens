@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="SpendLens">
@@ -3566,6 +3569,10 @@ select.form-input {
     <div><div class="setting-label">Export to CSV</div><div class="setting-desc">Download all transactions</div></div>
     <div class="setting-arrow">›</div>
   </div>
+  <div class="setting-item" onclick="forceCloudSync()">
+    <div><div class="setting-label">Force Cloud Sync</div><div class="setting-desc">Push local data to cloud now</div></div>
+    <div class="setting-arrow">›</div>
+  </div>
   <div class="setting-item" onclick="clearAllData()">
     <div><div class="setting-label" style="color:var(--red)">Clear All Data</div><div class="setting-desc">Remove all transactions</div></div>
     <div class="setting-arrow">›</div>
@@ -4238,7 +4245,10 @@ function init() {
   document.getElementById('txDate').value = new Date().toISOString().split('T')[0];
   updateMonthLabel();
   renderAll();
-  autoPostSubscriptions(); // post any subscription charges whose billing day has passed
+  // NOTE: autoPostSubscriptions is deliberately NOT called here anymore.
+  // It runs after loadFromCloud (in onSupabaseSignIn) so it operates on
+  // authoritative cloud state. If the user is offline / not signed in,
+  // we skip auto-posting until they are, to avoid creating duplicates.
   updateGmailUI();
   updateNightlySyncUI();
   showYesterdaySummary();
@@ -4449,6 +4459,10 @@ async function onSupabaseSignIn(session) {
   // migration failed (keep user on their local data; don't overwrite with
   // partially-uploaded cloud state).
   if (!justMigrated && !migrationFailed) await loadFromCloud();
+  // Dedupe any rows that accidentally duplicated in earlier versions
+  dedupeTransactions();
+  // Now that we have authoritative state, auto-post any due subscription charges
+  autoPostSubscriptions();
   renderAll();
 
   // Auto-sync Gmail on load if we have a valid token
@@ -4588,6 +4602,23 @@ async function loadFromCloud() {
 }
 
 // ─── Cloud flush (debounced) ─────────────────────────────────
+// ─── Manual flush trigger — surfaces errors to the user ─────
+async function forceCloudSync() {
+  if (!supabaseClient || !currentUserId) {
+    showSyncBar('error', '☁️', 'Not signed in. Tap Connect Gmail first.');
+    return;
+  }
+  if (cloudFlushTimer) { clearTimeout(cloudFlushTimer); cloudFlushTimer = null; }
+  showSyncBar('syncing', '☁️', 'Syncing to cloud…');
+  try {
+    await flushToCloud();
+    showSyncBar('success', '✅', 'Cloud sync complete');
+  } catch (e) {
+    console.error('forceCloudSync failed:', e);
+    showSyncBar('error', '❌', 'Sync failed: ' + (e.message || e).slice(0, 80));
+  }
+}
+
 function scheduleFlush(delayMs = 1500) {
   if (!supabaseClient || !currentUserId) return;
   if (cloudFlushTimer) clearTimeout(cloudFlushTimer);
@@ -4735,7 +4766,31 @@ async function flushToCloud() {
   await upsertChunked('transactions', txRows);
 }
 
-// ─── One-time migration: local ints → cloud UUIDs ───────────
+// ─── Dedupe helper ──────────────────────────────────────────
+// Removes transactions that are duplicates of each other (same date + merchant
+// + amount + card). Keeps the earliest row, deletes the rest both in memory
+// and in the cloud. Runs after loadFromCloud to clean up any lingering junk
+// from earlier buggy migration attempts.
+function dedupeTransactions() {
+  const seen = new Map();  // key → first-seen tx
+  const dupes = [];        // duplicates to remove
+  for (const tx of transactions) {
+    const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || ''].join('|');
+    if (seen.has(key)) {
+      dupes.push(tx);
+    } else {
+      seen.set(key, tx);
+    }
+  }
+  if (dupes.length === 0) return;
+  const dupeIds = new Set(dupes.map(d => d.id));
+  transactions = transactions.filter(tx => !dupeIds.has(tx.id));
+  // Queue cloud deletes so the next flush cleans them up there too
+  dupes.forEach(d => cloudDeletes.transactions.push(d.id));
+  saveToLocalStorage();
+  scheduleFlush(500);
+  console.log(`dedupeTransactions: removed ${dupes.length} duplicate(s)`);
+}
 async function migrateLocalToCloud() {
   const cardMap = {};    // old id → new uuid
   const subMap = {};     // old int id → new uuid
@@ -5019,6 +5074,10 @@ function decodeBase64(data) {
 function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId) {
   // Skip payment confirmation emails
   if (/payment\s*(received|confirmed|processed|posted)|thank\s*you\s*for\s*your\s*payment/i.test(fullText)) return null;
+  // Skip scheduled/upcoming transaction heads-up emails — these are not real charges yet,
+  // and are often bank transfers (e.g. scheduled payments to Amex HYSA) that shouldn't
+  // count as spending. The actual charge, if any, comes through as a separate email later.
+  if (/(your\s+)?upcoming\s+scheduled\s+transaction|scheduled\s+transaction\s+(is|has\s+been|will\s+be)|heads[\s-]up[:\s]|reminder[:\s].*payment|payment\s+scheduled/i.test(fullText)) return null;
 
   const lines = fullTextLines.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
@@ -5111,6 +5170,8 @@ function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId)
 function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   // Skip payment confirmation emails
   if (/payment\s*(received|confirmed|processed|posted)|thank\s*you\s*for\s*your\s*payment/i.test(fullText)) return null;
+  // Skip scheduled/upcoming transaction heads-up emails (not real charges)
+  if (/(your\s+)?upcoming\s+scheduled\s+transaction|scheduled\s+transaction\s+(is|has\s+been|will\s+be)|heads[\s-]up[:\s]|reminder[:\s].*payment|payment\s+scheduled/i.test(fullText)) return null;
 
   let amount = null;
   let merchant = null;
@@ -5337,14 +5398,20 @@ function autoPostSubscriptions() {
     const postDay = Math.min(sub.debitDay, daysInMonth);
     const postDate = `${todayYear}-${String(todayMonth + 1).padStart(2,'0')}-${String(postDay).padStart(2,'0')}`;
 
-    // Check if already posted this month (any transaction matching sub name + same month)
+    // Check if already posted this month. We check three ways to prevent
+    // duplicates after migrations or cross-device sync (where subscription
+    // IDs may have been regenerated): by subscription_id, by merchant+amount
+    // match, or by auto-sourced transactions from the subscription name.
     const thisMonthPrefix = `${todayYear}-${String(todayMonth + 1).padStart(2,'0')}`;
     const alreadyPosted = transactions.some(tx => {
-      return (
-        tx.source === 'subscription' &&
-        tx.subscriptionId === sub.id &&
-        tx.date && tx.date.startsWith(thisMonthPrefix)
-      );
+      if (!tx.date || !tx.date.startsWith(thisMonthPrefix)) return false;
+      // Match 1: exact subscription id link
+      if (tx.source === 'subscription' && tx.subscriptionId === sub.id) return true;
+      // Match 2: any tx (subscription-sourced or manually matching) with same
+      // merchant name and same amount in the same month — catches cases where
+      // the user manually logged it or subscription_id got lost in migration
+      if (tx.merchant === sub.name && Math.abs(tx.amount - sub.amount) < 0.01) return true;
+      return false;
     });
 
     if (!alreadyPosted) {
@@ -5389,11 +5456,11 @@ function openReassignModal(txId) {
       <div class="form-label">Change Category</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px">
         ${CATEGORIES.map(cat => `
-          <button onclick="reassignCategory(${txId},'${cat.id}')" style="padding:12px 8px;border-radius:10px;border:1px solid ${tx.category===cat.id?'var(--accent)':'var(--border)'};background:${tx.category===cat.id?'rgba(108,92,231,0.15)':'var(--bg)'};color:var(--text);font-family:'DM Sans',sans-serif;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500">
+          <button onclick="reassignCategory('${txId}','${cat.id}')" style="padding:12px 8px;border-radius:10px;border:1px solid ${tx.category===cat.id?'var(--accent)':'var(--border)'};background:${tx.category===cat.id?'rgba(108,92,231,0.15)':'var(--bg)'};color:var(--text);font-family:'DM Sans',sans-serif;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500">
             <span style="font-size:18px">${cat.icon}</span>${cat.name}
           </button>`).join('')}
       </div>
-      <button class="submit-btn danger" style="font-size:14px;padding:12px" onclick="deleteTransaction(${txId})">🗑️ Delete Transaction</button>
+      <button class="submit-btn danger" style="font-size:14px;padding:12px" onclick="deleteTransaction('${txId}')">🗑️ Delete Transaction</button>
       <div style="font-size:11px;color:var(--text-muted);text-align:center;margin-top:10px">Category changes are remembered for future "${tx.merchant.split(' ')[0]}" transactions</div>
     </div>`;
   document.body.appendChild(overlay);
