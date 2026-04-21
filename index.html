@@ -4090,6 +4090,7 @@ const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
 const SUPABASE_URL = 'https://pqkdsznxffwrbibkiape.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxa2Rzem54ZmZ3cmJpYmtpYXBlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MzMyNjcsImV4cCI6MjA5MjMwOTI2N30.R7oaJIR0Xg4AhmvDp41H9emTyZGxSKt0AFenueb88L4';
 let supabaseClient = null;
+let supabaseAccessToken = (typeof localStorage !== 'undefined' ? localStorage.getItem('spendlens_sb_token') : null) || null;
 let currentUserId = null;
 
 // ============================================================
@@ -4420,9 +4421,15 @@ function initSupabase() {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
   });
   supabaseClient.auth.onAuthStateChange(async (event, session) => {
+    if (session?.access_token) {
+      supabaseAccessToken = session.access_token;
+      localStorage.setItem('spendlens_sb_token', session.access_token);
+    }
     if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
       if (session) await onSupabaseSignIn(session);
     } else if (event === 'SIGNED_OUT') {
+      supabaseAccessToken = null;
+      localStorage.removeItem('spendlens_sb_token');
       onSupabaseSignOut();
     } else if (event === 'TOKEN_REFRESHED' && session?.provider_token) {
       gmailAccessToken = session.provider_token;
@@ -4481,9 +4488,8 @@ async function onSupabaseSignIn(session) {
   let migrationFailed = false;
   if (!localStorage.getItem(migrationKey)) {
     try {
-      const { data: existingPrefs } = await supabaseClient
-        .from('user_preferences').select('user_id')
-        .eq('user_id', currentUserId).maybeSingle();
+      const prefsRows = await sbSelect('user_preferences', `select=user_id&user_id=eq.${currentUserId}&limit=1`);
+      const existingPrefs = (prefsRows || [])[0];
       if (!existingPrefs && hasLocalData() && localGmailEmailMatches(session.user.email)) {
         // Snapshot pre-migration localStorage so we can roll back if anything goes wrong
         const preBackup = localStorage.getItem('spendlens_v4');
@@ -4594,44 +4600,41 @@ function handleGmailSync() {
 
 // ─── Cloud load ──────────────────────────────────────────────
 async function loadFromCloud() {
-  if (!supabaseClient || !currentUserId) return;
+  if (!currentUserId) return;
   try {
-    const [cards, txs, subs, pays, bals, buds, inc, goals, rules, hist, proc, prefs] = await Promise.all([
-      supabaseClient.from('cards').select('*').order('created_at'),
-      supabaseClient.from('transactions').select('*').order('tx_date', { ascending: false }).limit(5000),
-      supabaseClient.from('subscriptions').select('*'),
-      supabaseClient.from('card_payments').select('*').order('payment_date', { ascending: false }),
-      supabaseClient.from('card_balances').select('*'),
-      supabaseClient.from('budgets').select('*'),
-      supabaseClient.from('income_entries').select('*').order('income_date', { ascending: false }),
-      supabaseClient.from('savings_goals').select('*').order('created_at'),
-      supabaseClient.from('merchant_rules').select('*'),
-      supabaseClient.from('sync_history').select('*').order('sync_time', { ascending: false }).limit(20),
-      supabaseClient.from('processed_emails').select('*'),
-      supabaseClient.from('user_preferences').select('*').eq('user_id', currentUserId).maybeSingle(),
+    const [cardsData, txsData, subsData, paysData, balsData, budsData, incData, goalsData, rulesData, histData, procData, prefsData] = await Promise.all([
+      sbSelect('cards',            'select=*&order=created_at'),
+      sbSelect('transactions',     'select=*&order=tx_date.desc&limit=5000'),
+      sbSelect('subscriptions',    'select=*'),
+      sbSelect('card_payments',    'select=*&order=payment_date.desc'),
+      sbSelect('card_balances',    'select=*'),
+      sbSelect('budgets',          'select=*'),
+      sbSelect('income_entries',   'select=*&order=income_date.desc'),
+      sbSelect('savings_goals',    'select=*&order=created_at'),
+      sbSelect('merchant_rules',   'select=*'),
+      sbSelect('sync_history',     'select=*&order=sync_time.desc&limit=20'),
+      sbSelect('processed_emails', 'select=*'),
+      sbSelect('user_preferences', `select=*&user_id=eq.${currentUserId}&limit=1`),
     ]);
-    for (const r of [cards, txs, subs, pays, bals, buds, inc, goals, rules, hist, proc, prefs]) {
-      if (r.error) throw r.error;
-    }
 
-    CARDS = (cards.data || []).map(c => ({
+    CARDS = (cardsData || []).map(c => ({
       id: c.id, issuer: c.issuer, name: c.name, last4: c.last4, color: c.color,
       type: c.type || 'credit', creditLimit: Number(c.credit_limit) || 0, payDay: c.pay_day || 0,
     }));
-    transactions = (txs.data || []).map(t => ({
+    transactions = (txsData || []).map(t => ({
       id: t.id, amount: Number(t.amount), merchant: t.merchant, category: t.category,
       card: t.card_id, date: t.tx_date, time: t.tx_time || '12:00',
       source: t.source || 'manual',
       subscriptionId: t.subscription_id || undefined,
       emailId: t.email_id || undefined,
     }));
-    subscriptions = (subs.data || []).map(s => ({
+    subscriptions = (subsData || []).map(s => ({
       id: s.id, name: s.name, amount: Number(s.amount), cardId: s.card_id,
       cycle: s.cycle || 'monthly', category: s.category, active: !!s.active,
       autoDetected: !!s.auto_detected, debitDay: s.debit_day, addedMonth: s.added_month,
     }));
     cardPayments = {};
-    (pays.data || []).forEach(p => {
+    (paysData || []).forEach(p => {
       if (!cardPayments[p.card_id]) cardPayments[p.card_id] = [];
       cardPayments[p.card_id].push({
         id: p.id, date: p.payment_date, amount: Number(p.amount),
@@ -4639,52 +4642,53 @@ async function loadFromCloud() {
       });
     });
     cardBalances = {};
-    (bals.data || []).forEach(b => {
+    (balsData || []).forEach(b => {
       cardBalances[b.card_id] = {
         statementBalance: Number(b.statement_balance), apr: Number(b.apr),
         minPay: Number(b.min_pay), lastUpdated: b.last_updated,
       };
     });
     budgets = {};
-    (buds.data || []).forEach(b => { budgets[b.key] = Number(b.amount); });
-    incomeEntries = (inc.data || []).map(i => ({
+    (budsData || []).forEach(b => { budgets[b.key] = Number(b.amount); });
+    incomeEntries = (incData || []).map(i => ({
       id: i.id, amount: Number(i.amount), source: i.source, date: i.income_date,
       note: i.note, frequency: i.frequency, recurring: !!i.recurring, payDay: i.pay_day || 0,
     }));
-    savingsGoals = (goals.data || []).map(g => ({
+    savingsGoals = (goalsData || []).map(g => ({
       id: g.id, name: g.name, target: Number(g.target),
       savedSoFar: Number(g.saved_so_far), deadline: g.deadline,
       icon: g.icon, color: g.color,
       createdAt: (g.created_at || '').split('T')[0],
     }));
     merchantRules = {};
-    (rules.data || []).forEach(r => { merchantRules[r.merchant_key] = r.category; });
-    syncHistory = (hist.data || []).map(h => ({
+    (rulesData || []).forEach(r => { merchantRules[r.merchant_key] = r.category; });
+    syncHistory = (histData || []).map(h => ({
       time: h.sync_time, found: h.found, payments: h.payments, errors: h.errors, _id: h.id,
     }));
     processedEmailIds = new Set();
     processedPaymentEmailIds = new Set();
-    (proc.data || []).forEach(p => {
+    (procData || []).forEach(p => {
       if (p.kind === 'payment') processedPaymentEmailIds.add(p.email_id);
       else processedEmailIds.add(p.email_id);
     });
-    if (prefs.data) {
-      nightlySyncEnabled = !!prefs.data.nightly_sync_enabled;
-      yesterdayDismissed = !!prefs.data.yesterday_dismissed;
-      yesterdayDismissedDate = prefs.data.yesterday_dismissed_date || '';
-      debtStrategy = prefs.data.debt_strategy || debtStrategy;
+    const prefs = (prefsData || [])[0];
+    if (prefs) {
+      nightlySyncEnabled = !!prefs.nightly_sync_enabled;
+      yesterdayDismissed = !!prefs.yesterday_dismissed;
+      yesterdayDismissedDate = prefs.yesterday_dismissed_date || '';
+      debtStrategy = prefs.debt_strategy || debtStrategy;
     }
     saveToLocalStorage();
   } catch (e) {
     console.error('loadFromCloud failed:', e);
-    showSyncBar('error', '☁️', 'Cloud load failed: ' + (e.message || 'unknown'));
+    showSyncBar('error', '☁️', 'Cloud load failed: ' + (e.message || 'unknown').slice(0, 120));
   }
 }
 
 // ─── Cloud flush (debounced) ─────────────────────────────────
 // ─── Manual flush trigger — surfaces errors to the user ─────
 async function forceCloudSync() {
-  if (!supabaseClient || !currentUserId) {
+  if (!supabaseAccessToken || !currentUserId) {
     showSyncBar('error', '☁️', 'Not signed in. Tap Connect Gmail first.');
     return;
   }
@@ -4709,7 +4713,7 @@ async function forceCloudSync() {
 function scheduleFlush(delayMs = 1500) {
   // Always persist cloudDeletes so they survive tab close / PWA sleep
   persistCloudDeletes();
-  if (!supabaseClient || !currentUserId) {
+  if (!supabaseAccessToken || !currentUserId) {
     // Remember that we have unflushed work; onSupabaseSignIn will flush
     pendingFlushRequest = true;
     console.log('[schedule] not signed in yet, marked pending');
@@ -4725,10 +4729,76 @@ function scheduleFlush(delayMs = 1500) {
   updateSyncStatus('pending');
 }
 
+// ── Raw REST helper — bypasses the Supabase SDK entirely ────
+// We hit PostgREST directly with fetch() so the SDK's stuck token-refresh
+// loop can't block writes. Anon key in apikey header + user access token
+// in Authorization header → PostgREST enforces RLS just fine.
+async function sbFetch(path, opts = {}) {
+  const token = supabaseAccessToken || localStorage.getItem('spendlens_sb_token');
+  if (!token) throw new Error('No Supabase access token — sign in first');
+  const url = SUPABASE_URL + '/rest/v1/' + path;
+  const headers = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': 'Bearer ' + token,
+    'Content-Type': 'application/json',
+    ...(opts.headers || {}),
+  };
+  // Per-request 20s timeout so we never hang
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const res = await fetch(url, { ...opts, headers, signal: ctrl.signal });
+    clearTimeout(t);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`${opts.method || 'GET'} ${path} → ${res.status}: ${body.slice(0, 200)}`);
+    }
+    // Empty-body responses (DELETE returns 204; POST with Prefer=minimal returns 201 empty)
+    if (res.status === 204) return null;
+    const text = await res.text();
+    if (!text) return null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('json')) {
+      try { return JSON.parse(text); } catch { return null; }
+    }
+    return text;
+  } catch (e) {
+    clearTimeout(t);
+    if (e.name === 'AbortError') throw new Error(`${opts.method || 'GET'} ${path} timed out (20s)`);
+    throw e;
+  }
+}
+
+// Convenience wrappers
+async function sbUpsert(table, rows, onConflict) {
+  if (!rows || !rows.length) return;
+  const qs = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
+  return sbFetch(table + qs, {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(rows),
+  });
+}
+async function sbDeleteIn(table, column, values) {
+  if (!values || !values.length) return;
+  // PostgREST: DELETE /table?id=in.(a,b,c)
+  const vals = values.map(v => encodeURIComponent(v)).join(',');
+  return sbFetch(`${table}?${column}=in.(${vals})`, { method: 'DELETE' });
+}
+async function sbDeleteEq(table, filters) {
+  // filters: {col: val, col: val} — AND semantics
+  const qs = Object.entries(filters)
+    .map(([k, v]) => `${k}=eq.${encodeURIComponent(v)}`).join('&');
+  return sbFetch(`${table}?${qs}`, { method: 'DELETE' });
+}
+async function sbSelect(table, qs = 'select=*') {
+  return sbFetch(`${table}?${qs}`);
+}
+
 async function flushToCloud() {
-  if (!supabaseClient || !currentUserId) { console.log('[flush] aborted: no client or user'); return; }
+  if (!currentUserId) { console.log('[flush] aborted: no user'); return; }
   const uid = currentUserId;
-  console.log('[flush] starting for user:', uid);
+  console.log('[flush] starting (raw REST) for user:', uid);
   console.log('[flush] in-memory state:',
     'cards=' + CARDS.length,
     'tx=' + transactions.length,
@@ -4740,60 +4810,47 @@ async function flushToCloud() {
     'deletes.cards=' + cloudDeletes.cards.length
   );
 
-  // Helper: upsert in chunks of CHUNK_SIZE, awaiting each chunk
   const CHUNK_SIZE = 500;
-  async function upsertChunked(table, rows, opts) {
+  async function upsertChunked(table, rows, onConflict) {
     if (!rows || !rows.length) { console.log('  [upsert] ' + table + ': 0 rows (skip)'); return; }
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
       const slice = rows.slice(i, i + CHUNK_SIZE);
       console.log('  [upsert] ' + table + ': ' + slice.length + ' rows (chunk ' + i + ')');
-      const { error } = await supabaseClient.from(table).upsert(slice, opts);
-      if (error) {
-        console.error('  [upsert] ' + table + ' FAILED:', error);
-        const e = new Error(`upsert ${table} (chunk ${i}-${i+slice.length}): ${error.message}`);
-        e.cause = error;
-        throw e;
-      }
+      await sbUpsert(table, slice, onConflict);
       console.log('  [upsert] ' + table + ' OK');
     }
   }
 
-  // 1) Deletes — run all in parallel, doesn't matter
-  const dJobs = [];
+  // 1) Deletes
   const take = (k) => { const a = cloudDeletes[k]; cloudDeletes[k] = []; return a; };
-  const dT = take('transactions');   if (dT.length) dJobs.push(supabaseClient.from('transactions').delete().in('id', dT));
-  const dS = take('subscriptions');  if (dS.length) dJobs.push(supabaseClient.from('subscriptions').delete().in('id', dS));
-  const dP = take('card_payments');  if (dP.length) dJobs.push(supabaseClient.from('card_payments').delete().in('id', dP));
-  const dI = take('income_entries'); if (dI.length) dJobs.push(supabaseClient.from('income_entries').delete().in('id', dI));
-  const dG = take('savings_goals');  if (dG.length) dJobs.push(supabaseClient.from('savings_goals').delete().in('id', dG));
-  for (const b of take('budgets'))
-    dJobs.push(supabaseClient.from('budgets').delete().eq('user_id', uid).eq('key', b.key));
-  for (const b of take('card_balances'))
-    dJobs.push(supabaseClient.from('card_balances').delete().eq('user_id', uid).eq('card_id', b.card_id));
-  for (const r of take('merchant_rules'))
-    dJobs.push(supabaseClient.from('merchant_rules').delete().eq('user_id', uid).eq('merchant_key', r.merchant_key));
-  for (const p of take('processed_emails'))
-    dJobs.push(supabaseClient.from('processed_emails').delete()
-      .eq('user_id', uid).eq('email_id', p.email_id).eq('kind', p.kind));
-  // Card deletes go LAST among deletes so FK-child rows (payments, balances, transactions)
-  // don't reference a card about to be deleted mid-batch.
-  const dC = take('cards');          if (dC.length) dJobs.push(supabaseClient.from('cards').delete().in('id', dC));
-  if (dJobs.length) {
-    console.log('[flush] running', dJobs.length, 'delete job(s)');
-    const delResults = await Promise.all(dJobs);
-    const delErrs = delResults.filter(r => r && r.error);
-    if (delErrs.length) {
-      delErrs.forEach(r => console.error('[flush] delete error:', r.error));
-    }
-    console.log('[flush] deletes complete,', delErrs.length, 'errors');
+  const dT = take('transactions');
+  const dS = take('subscriptions');
+  const dP = take('card_payments');
+  const dI = take('income_entries');
+  const dG = take('savings_goals');
+  const dBud = take('budgets');
+  const dBal = take('card_balances');
+  const dRules = take('merchant_rules');
+  const dProc = take('processed_emails');
+  const dC = take('cards');
+  const deleteJobs = [];
+  if (dT.length)    deleteJobs.push(sbDeleteIn('transactions', 'id', dT));
+  if (dS.length)    deleteJobs.push(sbDeleteIn('subscriptions', 'id', dS));
+  if (dP.length)    deleteJobs.push(sbDeleteIn('card_payments', 'id', dP));
+  if (dI.length)    deleteJobs.push(sbDeleteIn('income_entries', 'id', dI));
+  if (dG.length)    deleteJobs.push(sbDeleteIn('savings_goals', 'id', dG));
+  for (const b of dBud)  deleteJobs.push(sbDeleteEq('budgets',        { user_id: uid, key: b.key }));
+  for (const b of dBal)  deleteJobs.push(sbDeleteEq('card_balances',  { user_id: uid, card_id: b.card_id }));
+  for (const r of dRules)deleteJobs.push(sbDeleteEq('merchant_rules', { user_id: uid, merchant_key: r.merchant_key }));
+  for (const p of dProc) deleteJobs.push(sbDeleteEq('processed_emails', { user_id: uid, email_id: p.email_id, kind: p.kind }));
+  if (dC.length)    deleteJobs.push(sbDeleteIn('cards', 'id', dC));
+  if (deleteJobs.length) {
+    console.log('[flush] running', deleteJobs.length, 'delete job(s)');
+    await Promise.all(deleteJobs);
+    console.log('[flush] deletes complete');
   }
 
-  // 2) Upserts — TIERED so FK parents land before FK children.
-  // Tier A: roots (no FK to other user data): cards, merchant_rules, budgets, goals, income, sync_history, processed_emails, prefs
-  // Tier B: FK → cards: subscriptions, card_balances, card_payments
-  // Tier C: FK → cards + subscriptions: transactions
-
-  // ── TIER A ─────────────────────────────────────────────────
+  // 2) TIER A
   const cardRows = CARDS.map(c => ({
     id: c.id, user_id: uid, issuer: c.issuer, name: c.name, last4: c.last4,
     color: c.color, type: c.type || 'credit',
@@ -4825,25 +4882,25 @@ async function flushToCloud() {
   processedPaymentEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'payment' }));
 
   console.log('[flush] Tier A: cards (' + cardRows.length + ' rows)');
-  await upsertChunked('cards', cardRows);
+  await upsertChunked('cards', cardRows, 'id');
   console.log('[flush] Tier A cards done, now parallel misc');
   await Promise.all([
-    upsertChunked('income_entries', incRows),
-    upsertChunked('savings_goals', goalRows),
-    upsertChunked('merchant_rules', ruleRows, { onConflict: 'user_id,merchant_key' }),
-    upsertChunked('budgets', budRows, { onConflict: 'user_id,key' }),
-    upsertChunked('sync_history', histRows),
-    upsertChunked('processed_emails', procRows, { onConflict: 'user_id,email_id,kind' }),
-    supabaseClient.from('user_preferences').upsert({
+    upsertChunked('income_entries', incRows, 'id'),
+    upsertChunked('savings_goals', goalRows, 'id'),
+    upsertChunked('merchant_rules', ruleRows, 'user_id,merchant_key'),
+    upsertChunked('budgets', budRows, 'user_id,key'),
+    upsertChunked('sync_history', histRows, 'id'),
+    upsertChunked('processed_emails', procRows, 'user_id,email_id,kind'),
+    sbUpsert('user_preferences', [{
       user_id: uid, theme: document.body.dataset.theme || 'light',
       debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
       yesterday_dismissed: !!yesterdayDismissed,
       yesterday_dismissed_date: yesterdayDismissedDate || null,
-    }).then(r => { if (r.error) throw new Error('user_preferences: ' + r.error.message); }),
+    }], 'user_id'),
   ]);
   console.log('[flush] Tier A complete');
 
-  // ── TIER B ─────────────────────────────────────────────────
+  // 3) TIER B
   const subRows = subscriptions.map(s => ({
     id: s.id, user_id: uid, card_id: s.cardId || null, name: s.name, amount: Number(s.amount),
     cycle: s.cycle || 'monthly', category: s.category || null, active: !!s.active,
@@ -4868,13 +4925,13 @@ async function flushToCloud() {
   });
   console.log('[flush] Tier B: subs=' + subRows.length + ', bals=' + balRows.length + ', pays=' + payRows.length);
   await Promise.all([
-    upsertChunked('subscriptions', subRows),
-    upsertChunked('card_balances', balRows, { onConflict: 'user_id,card_id' }),
-    upsertChunked('card_payments', payRows),
+    upsertChunked('subscriptions', subRows, 'id'),
+    upsertChunked('card_balances', balRows, 'user_id,card_id'),
+    upsertChunked('card_payments', payRows, 'id'),
   ]);
   console.log('[flush] Tier B complete');
 
-  // ── TIER C ─────────────────────────────────────────────────
+  // 4) TIER C
   const txRows = transactions.map(t => ({
     id: t.id, user_id: uid, card_id: t.card || null, subscription_id: t.subscriptionId || null,
     amount: Number(t.amount), merchant: t.merchant, category: t.category,
@@ -4882,7 +4939,7 @@ async function flushToCloud() {
     source: t.source || 'manual', email_id: t.emailId || null,
   }));
   console.log('[flush] Tier C: transactions (' + txRows.length + ' rows)');
-  await upsertChunked('transactions', txRows);
+  await upsertChunked('transactions', txRows, 'id');
   console.log('[flush] Tier C complete — flush SUCCESS');
 }
 
