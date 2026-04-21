@@ -6679,7 +6679,7 @@ function savePayment(cardId,source,amount=null,date=null){
   if(!cardPayments)cardPayments={};
   if(!cardPayments[cardId])cardPayments[cardId]=[];
   const exists=cardPayments[cardId].some(p=>p.date===payDate&&Math.abs(p.amount-payAmt)<0.01);
-  if(!exists){cardPayments[cardId].unshift({date:payDate,amount:payAmt,source});if(cardPayments[cardId].length>20)cardPayments[cardId].pop();prunePayments();saveToStorage();showSyncBar('success','✅',`Payment of <strong>$${payAmt.toFixed(2)}</strong> recorded`);}
+  if(!exists){cardPayments[cardId].unshift({id:crypto.randomUUID(),date:payDate,amount:payAmt,source});if(cardPayments[cardId].length>20)cardPayments[cardId].pop();prunePayments();saveToStorage();showSyncBar('success','✅',`Payment of <strong>$${payAmt.toFixed(2)}</strong> recorded`);}
   document.getElementById('logPaymentOverlay')?.remove();
 }
 
@@ -7085,7 +7085,7 @@ function saveCardBalance(){
   cardBalances[cardId]={statementBalance:balance,apr,minPay,lastUpdated:new Date().toISOString().split('T')[0]};
   saveToStorage();closeModal('logBalanceModal');renderDebtPlanner();showSyncBar('success','💳','Balance updated');
 }
-function setDebtStrategy(s){debtStrategy=s;document.querySelectorAll('.strategy-btn').forEach(b=>b.classList.remove('active'));document.getElementById('strategy-'+s)?.classList.add('active');renderDebtProjection();}
+function setDebtStrategy(s){debtStrategy=s;document.querySelectorAll('.strategy-btn').forEach(b=>b.classList.remove('active'));document.getElementById('strategy-'+s)?.classList.add('active');saveToStorage();renderDebtProjection();}
 function renderDebtPlanner(){
   const el=document.getElementById('debtCardsList');if(!el)return;
   const creditCards=CARDS.filter(c=>(c.type||'credit')==='credit');
@@ -7309,7 +7309,7 @@ function saveManualPayment() {
   if (!cardPayments[cardId]) cardPayments[cardId] = [];
   const exists = cardPayments[cardId].some(p => p.date === date && Math.abs(p.amount - amount) < 0.01);
   if (!exists) {
-    cardPayments[cardId].unshift({ date, amount, source: 'manual', note });
+    cardPayments[cardId].unshift({ id: crypto.randomUUID(), date, amount, source: 'manual', note });
     if (cardPayments[cardId].length > 50) cardPayments[cardId].pop();
   }
   prunePayments();
@@ -7580,6 +7580,8 @@ function toggleTheme() {
   try {
     window.parent.postMessage({type: '__edit_mode_set_keys', edits: {theme: next}}, '*');
   } catch(e) {}
+  // Persist theme to cloud via user_preferences
+  scheduleFlush();
 }
 
 // ═══ TAB BAR: sync active state with current page ═══
