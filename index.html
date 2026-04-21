@@ -4385,8 +4385,12 @@ function localGmailEmailMatches(email) {
   } catch { return true; }
 }
 
+let signInInProgress = false;
 async function onSupabaseSignIn(session) {
-  currentUserId = session.user.id;
+  if (signInInProgress) return;          // guard against double-fire
+  signInInProgress = true;
+  try {
+    currentUserId = session.user.id;
   gmailUser = {
     id: session.user.id,
     email: session.user.email,
@@ -4452,6 +4456,9 @@ async function onSupabaseSignIn(session) {
     setTimeout(() => { try { syncGmail(true); } catch (e) { console.error(e); } }, 1500);
   }
   if (nightlySyncEnabled) startNightlySyncTimer();
+  } finally {
+    signInInProgress = false;
+  }
 }
 
 function onSupabaseSignOut() {
@@ -4594,11 +4601,25 @@ async function flushToCloud() {
   if (!supabaseClient || !currentUserId) return;
   const uid = currentUserId;
 
-  // 1) Deletes
+  // Helper: upsert in chunks of CHUNK_SIZE, awaiting each chunk
+  const CHUNK_SIZE = 500;
+  async function upsertChunked(table, rows, opts) {
+    if (!rows || !rows.length) return;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const slice = rows.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabaseClient.from(table).upsert(slice, opts);
+      if (error) {
+        const e = new Error(`upsert ${table} (chunk ${i}-${i+slice.length}): ${error.message}`);
+        e.cause = error;
+        throw e;
+      }
+    }
+  }
+
+  // 1) Deletes — run all in parallel, doesn't matter
   const dJobs = [];
   const take = (k) => { const a = cloudDeletes[k]; cloudDeletes[k] = []; return a; };
   const dT = take('transactions');   if (dT.length) dJobs.push(supabaseClient.from('transactions').delete().in('id', dT));
-  const dC = take('cards');          if (dC.length) dJobs.push(supabaseClient.from('cards').delete().in('id', dC));
   const dS = take('subscriptions');  if (dS.length) dJobs.push(supabaseClient.from('subscriptions').delete().in('id', dS));
   const dP = take('card_payments');  if (dP.length) dJobs.push(supabaseClient.from('card_payments').delete().in('id', dP));
   const dI = take('income_entries'); if (dI.length) dJobs.push(supabaseClient.from('income_entries').delete().in('id', dI));
@@ -4612,91 +4633,106 @@ async function flushToCloud() {
   for (const p of take('processed_emails'))
     dJobs.push(supabaseClient.from('processed_emails').delete()
       .eq('user_id', uid).eq('email_id', p.email_id).eq('kind', p.kind));
-  if (dJobs.length) await Promise.all(dJobs);
+  // Card deletes go LAST among deletes so FK-child rows (payments, balances, transactions)
+  // don't reference a card about to be deleted mid-batch.
+  const dC = take('cards');          if (dC.length) dJobs.push(supabaseClient.from('cards').delete().in('id', dC));
+  if (dJobs.length) {
+    const delResults = await Promise.all(dJobs);
+    const delErrs = delResults.filter(r => r && r.error);
+    if (delErrs.length) {
+      delErrs.forEach(r => console.error('delete error:', r.error));
+    }
+  }
 
-  // 2) Upserts (bulk, parallel)
-  const jobs = [];
-  if (CARDS.length) jobs.push(supabaseClient.from('cards').upsert(CARDS.map(c => ({
+  // 2) Upserts — TIERED so FK parents land before FK children.
+  // Tier A: roots (no FK to other user data): cards, merchant_rules, budgets, goals, income, sync_history, processed_emails, prefs
+  // Tier B: FK → cards: subscriptions, card_balances, card_payments
+  // Tier C: FK → cards + subscriptions: transactions
+
+  // ── TIER A ─────────────────────────────────────────────────
+  const cardRows = CARDS.map(c => ({
     id: c.id, user_id: uid, issuer: c.issuer, name: c.name, last4: c.last4,
     color: c.color, type: c.type || 'credit',
     credit_limit: Number(c.creditLimit) || 0, pay_day: Number(c.payDay) || 0,
-  }))));
-  if (subscriptions.length) jobs.push(supabaseClient.from('subscriptions').upsert(subscriptions.map(s => ({
+  }));
+  const incRows = incomeEntries.map(i => ({
+    id: i.id, user_id: uid, amount: Number(i.amount), source: i.source, income_date: i.date,
+    note: i.note || null, frequency: i.frequency || 'once',
+    recurring: !!i.recurring, pay_day: Number(i.payDay) || 0,
+  }));
+  const goalRows = savingsGoals.map(g => ({
+    id: g.id, user_id: uid, name: g.name, target: Number(g.target),
+    saved_so_far: Number(g.savedSoFar) || 0, deadline: g.deadline || null,
+    icon: g.icon || null, color: g.color || null,
+  }));
+  const ruleRows = Object.entries(merchantRules || {}).map(([key, cat]) => ({
+    user_id: uid, merchant_key: key, category: cat,
+  }));
+  const budRows = Object.entries(budgets || {}).map(([key, amt]) => ({
+    user_id: uid, key, amount: Number(amt),
+  }));
+  const histRows = syncHistory.map(h => {
+    if (!h._id) h._id = crypto.randomUUID();
+    return { id: h._id, user_id: uid, sync_time: h.time,
+      found: h.found || 0, payments: h.payments || 0, errors: h.errors || 0 };
+  });
+  const procRows = [];
+  processedEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'transaction' }));
+  processedPaymentEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'payment' }));
+
+  await upsertChunked('cards', cardRows);
+  await Promise.all([
+    upsertChunked('income_entries', incRows),
+    upsertChunked('savings_goals', goalRows),
+    upsertChunked('merchant_rules', ruleRows, { onConflict: 'user_id,merchant_key' }),
+    upsertChunked('budgets', budRows, { onConflict: 'user_id,key' }),
+    upsertChunked('sync_history', histRows),
+    upsertChunked('processed_emails', procRows, { onConflict: 'user_id,email_id,kind' }),
+    supabaseClient.from('user_preferences').upsert({
+      user_id: uid, theme: document.body.dataset.theme || 'light',
+      debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
+      yesterday_dismissed: !!yesterdayDismissed,
+      yesterday_dismissed_date: yesterdayDismissedDate || null,
+    }).then(r => { if (r.error) throw new Error('user_preferences: ' + r.error.message); }),
+  ]);
+
+  // ── TIER B ─────────────────────────────────────────────────
+  const subRows = subscriptions.map(s => ({
     id: s.id, user_id: uid, card_id: s.cardId || null, name: s.name, amount: Number(s.amount),
     cycle: s.cycle || 'monthly', category: s.category || null, active: !!s.active,
     auto_detected: !!s.autoDetected, debit_day: s.debitDay || null, added_month: s.addedMonth || null,
-  }))));
-  if (transactions.length) jobs.push(supabaseClient.from('transactions').upsert(transactions.map(t => ({
-    id: t.id, user_id: uid, card_id: t.card || null, subscription_id: t.subscriptionId || null,
-    amount: Number(t.amount), merchant: t.merchant, category: t.category,
-    tx_date: t.date, tx_time: t.time || '12:00',
-    source: t.source || 'manual', email_id: t.emailId || null,
-  }))));
-  const allPayments = [];
-  Object.entries(cardPayments || {}).forEach(([cardId, arr]) => {
-    (arr || []).forEach(p => {
-      if (!p.id) p.id = crypto.randomUUID();
-      allPayments.push({
-        id: p.id, user_id: uid, card_id: cardId, payment_date: p.date,
-        amount: Number(p.amount), source: p.source || 'manual',
-        note: p.note || null, email_id: p.emailId || null,
-      });
-    });
-  });
-  if (allPayments.length) jobs.push(supabaseClient.from('card_payments').upsert(allPayments));
+  }));
   const balRows = Object.entries(cardBalances || {}).map(([cardId, b]) => ({
     user_id: uid, card_id: cardId,
     statement_balance: Number(b.statementBalance) || 0,
     apr: Number(b.apr) || 0, min_pay: Number(b.minPay) || 0,
     last_updated: b.lastUpdated || null,
   }));
-  if (balRows.length) jobs.push(supabaseClient.from('card_balances').upsert(balRows));
-  const budRows = Object.entries(budgets || {}).map(([key, amt]) => ({
-    user_id: uid, key, amount: Number(amt),
-  }));
-  if (budRows.length) jobs.push(supabaseClient.from('budgets').upsert(budRows));
-  if (incomeEntries.length) jobs.push(supabaseClient.from('income_entries').upsert(incomeEntries.map(i => ({
-    id: i.id, user_id: uid, amount: Number(i.amount), source: i.source, income_date: i.date,
-    note: i.note || null, frequency: i.frequency || 'once',
-    recurring: !!i.recurring, pay_day: Number(i.payDay) || 0,
-  }))));
-  if (savingsGoals.length) jobs.push(supabaseClient.from('savings_goals').upsert(savingsGoals.map(g => ({
-    id: g.id, user_id: uid, name: g.name, target: Number(g.target),
-    saved_so_far: Number(g.savedSoFar) || 0, deadline: g.deadline || null,
-    icon: g.icon || null, color: g.color || null,
-  }))));
-  const ruleRows = Object.entries(merchantRules || {}).map(([key, cat]) => ({
-    user_id: uid, merchant_key: key, category: cat,
-  }));
-  if (ruleRows.length) jobs.push(supabaseClient.from('merchant_rules').upsert(ruleRows));
-  if (syncHistory.length) jobs.push(supabaseClient.from('sync_history').upsert(syncHistory.map(h => {
-    if (!h._id) h._id = crypto.randomUUID();
-    return {
-      id: h._id, user_id: uid, sync_time: h.time,
-      found: h.found || 0, payments: h.payments || 0, errors: h.errors || 0,
-    };
-  })));
-  const procRows = [];
-  processedEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'transaction' }));
-  processedPaymentEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'payment' }));
-  if (procRows.length) jobs.push(supabaseClient.from('processed_emails').upsert(procRows));
+  const payRows = [];
+  Object.entries(cardPayments || {}).forEach(([cardId, arr]) => {
+    (arr || []).forEach(p => {
+      if (!p.id) p.id = crypto.randomUUID();
+      payRows.push({
+        id: p.id, user_id: uid, card_id: cardId, payment_date: p.date,
+        amount: Number(p.amount), source: p.source || 'manual',
+        note: p.note || null, email_id: p.emailId || null,
+      });
+    });
+  });
+  await Promise.all([
+    upsertChunked('subscriptions', subRows),
+    upsertChunked('card_balances', balRows, { onConflict: 'user_id,card_id' }),
+    upsertChunked('card_payments', payRows),
+  ]);
 
-  jobs.push(supabaseClient.from('user_preferences').upsert({
-    user_id: uid, theme: document.body.dataset.theme || 'light',
-    debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
-    yesterday_dismissed: !!yesterdayDismissed,
-    yesterday_dismissed_date: yesterdayDismissedDate || null,
+  // ── TIER C ─────────────────────────────────────────────────
+  const txRows = transactions.map(t => ({
+    id: t.id, user_id: uid, card_id: t.card || null, subscription_id: t.subscriptionId || null,
+    amount: Number(t.amount), merchant: t.merchant, category: t.category,
+    tx_date: t.date, tx_time: t.time || '12:00',
+    source: t.source || 'manual', email_id: t.emailId || null,
   }));
-
-  const results = await Promise.all(jobs);
-  const errs = results.filter(r => r && r.error);
-  if (errs.length) {
-    errs.forEach(r => console.error('flush error:', r.error));
-    const e = new Error('cloud flush had ' + errs.length + ' error(s): ' +
-      errs.map(r => r.error?.message || 'unknown').join('; '));
-    e.partialFailures = errs;
-    throw e;
-  }
+  await upsertChunked('transactions', txRows);
 }
 
 // ─── One-time migration: local ints → cloud UUIDs ───────────
