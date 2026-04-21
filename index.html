@@ -1315,6 +1315,7 @@ select.form-input {
 }
 .card-type-badge.credit { background: var(--accent-soft); color: var(--accent); }
 .card-type-badge.debit { background: var(--green-soft); color: var(--green); }
+.card-type-badge.bank { background: var(--blue-soft); color: var(--blue); }
 
 /* ════════ Finance Hub ════════ */
 .fin-hero {
@@ -1896,7 +1897,7 @@ select.form-input {
 }
 .bold-dash .cards-scroll {
   margin: 0 !important;
-  padding: 2px 16px 6px 4px !important;
+  padding: 2px 16px 6px 20px !important;
   gap: 8px !important;
 }
 /* Compact chip — only show essentials */
@@ -3654,10 +3655,11 @@ select.form-input {
       <label class="form-label">Card Type</label>
       <div class="card-select-group">
         <button class="card-select-btn selected" id="cardTypeCredit" onclick="selectCardType('credit')">💳 Credit</button>
-        <button class="card-select-btn" id="cardTypeDebit" onclick="selectCardType('debit')">🏦 Debit</button>
+        <button class="card-select-btn" id="cardTypeDebit" onclick="selectCardType('debit')">🏧 Debit</button>
+        <button class="card-select-btn" id="cardTypeBank" onclick="selectCardType('bank')">🏦 Bank</button>
       </div>
     </div>
-    <div class="form-row">
+    <div class="form-row" id="creditOnlyFields">
       <div class="form-group">
         <label class="form-label">Credit Limit ($)</label>
         <input type="number" class="form-input" id="newCardLimit" placeholder="e.g. 10000" step="100" inputmode="decimal">
@@ -5152,8 +5154,25 @@ function onCardIssuerChange() {
 
 function selectCardType(type) {
   newCardType = type;
-  document.getElementById('cardTypeCredit').classList.toggle('selected', type==='credit');
-  document.getElementById('cardTypeDebit').classList.toggle('selected', type==='debit');
+  document.getElementById('cardTypeCredit').classList.toggle('selected', type === 'credit');
+  document.getElementById('cardTypeDebit').classList.toggle('selected', type === 'debit');
+  document.getElementById('cardTypeBank')?.classList.toggle('selected', type === 'bank');
+  // Credit limit + pay day only apply to credit cards
+  const creditFields = document.getElementById('creditOnlyFields');
+  if (creditFields) creditFields.style.display = (type === 'credit') ? '' : 'none';
+  // Bank type: replace credit-card name list with generic account types
+  const sel = document.getElementById('newCardName');
+  if (sel) {
+    if (type === 'bank') {
+      sel.innerHTML = '<option value="">Select account type...</option>'
+        + '<option value="Checking">Checking</option>'
+        + '<option value="Savings">Savings</option>'
+        + '<option value="Money Market">Money Market</option>';
+    } else {
+      // Restore credit-card list for the currently-selected issuer
+      onCardIssuerChange();
+    }
+  }
 }
 
 function renderColorPicker() {
@@ -5916,6 +5935,8 @@ function openAddCardModal() {
   newCardType='credit'; newCardColor='#6c5ce7';
   document.getElementById('cardTypeCredit').classList.add('selected');
   document.getElementById('cardTypeDebit').classList.remove('selected');
+  document.getElementById('cardTypeBank')?.classList.remove('selected');
+  const creditFields=document.getElementById('creditOnlyFields'); if(creditFields)creditFields.style.display='';
   renderColorPicker();
 }
 
@@ -5924,14 +5945,16 @@ function saveNewCard() {
   const cardName=document.getElementById('newCardName').value;
   const customName=document.getElementById('newCardCustomName').value.trim();
   const last4=document.getElementById('newCardLast4').value.trim();
-  const creditLimit=parseFloat(document.getElementById('newCardLimit')?.value)||0;
-  const payDay=parseInt(document.getElementById('newCardPayDay')?.value)||0;
+  const creditLimit = newCardType === 'credit' ? (parseFloat(document.getElementById('newCardLimit')?.value)||0) : 0;
+  const payDay = newCardType === 'credit' ? (parseInt(document.getElementById('newCardPayDay')?.value)||0) : 0;
   if(!issuer||!last4||last4.length!==4){alert('Please fill issuer and last 4 digits');return;}
-  const name=customName||cardName||`${issuer} Card`;
+  const fallbackName = newCardType === 'bank' ? `${issuer} Checking` : `${issuer} Card`;
+  const name=customName||cardName||fallbackName;
   const id=`${issuer}-${last4}-${nextCardId++}`;
   CARDS.push({id,issuer,name,last4,color:newCardColor,type:newCardType,creditLimit,payDay});
   saveToStorage(); closeModal('addCardModal'); renderAll(); renderSettingsCards();
-  showSyncBar('success','💳',`<strong>${name}</strong> added`);
+  const icon = newCardType === 'bank' ? '🏦' : newCardType === 'debit' ? '🏧' : '💳';
+  showSyncBar('success',icon,`<strong>${name}</strong> added`);
 }
 
 // ══════════════════════════════════════════════════════
