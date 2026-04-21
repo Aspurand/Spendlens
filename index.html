@@ -14,6 +14,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500;1,9..144,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 /* ═══════════════════════════════════════════════════════════════
    SpendLens · Woody Edition
@@ -4036,6 +4037,13 @@ const SPEND_TWEAKS = /*EDITMODE-BEGIN*/{
 const GOOGLE_CLIENT_ID = '387324579052-6h4kfrged2l08n9vcbehqfuname7165n.apps.googleusercontent.com';
 const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
 
+// Supabase — cloud database + auth. Anon key is safe for client-side; RLS
+// policies in the database guarantee each user only sees their own rows.
+const SUPABASE_URL = 'https://pqkdsznxffwrbibkiape.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxa2Rzem54ZmZ3cmJpYmtpYXBlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MzMyNjcsImV4cCI6MjA5MjMwOTI2N30.R7oaJIR0Xg4AhmvDp41H9emTyZGxSKt0AFenueb88L4';
+let supabaseClient = null;
+let currentUserId = null;
+
 // ============================================================
 // CARD DATABASE — issuer → known cards with reward structures
 // ============================================================
@@ -4235,19 +4243,7 @@ function init() {
   updateNightlySyncUI();
   showYesterdaySummary();
 
-  // Auto-sync if connected (silent re-auth attempt)
-  if (gmailUser) {
-    setTimeout(() => {
-      if (gmailAccessToken) {
-        syncGmail(true);
-      } else {
-        // Try silent re-auth
-        trySilentReAuth();
-      }
-    }, 1500);
-  }
-
-  // Setup nightly sync timer
+  // Nightly sync timer — cloud sign-in will also start this via onSupabaseSignIn
   if (nightlySyncEnabled) startNightlySyncTimer();
 }
 
@@ -4297,15 +4293,21 @@ function prunePayments() {
     .toISOString().split('T')[0];
   for (const cardId in cardPayments) {
     const lastUpdated = (cardBalances[cardId] || {}).lastUpdated || '';
-    cardPayments[cardId] = (cardPayments[cardId] || []).filter(p => {
-      if (!p || !p.date) return false;
+    const kept = [];
+    (cardPayments[cardId] || []).forEach(p => {
+      if (!p || !p.date) return;
       // Keep if within retention window OR still in the active statement period
-      return p.date >= cutoff || (lastUpdated && p.date >= lastUpdated);
+      if (p.date >= cutoff || (lastUpdated && p.date >= lastUpdated)) {
+        kept.push(p);
+      } else if (p.id) {
+        cloudDeletes.card_payments.push(p.id);
+      }
     });
+    cardPayments[cardId] = kept;
   }
 }
 
-function saveToStorage() {
+function saveToLocalStorage() {
   try {
     localStorage.setItem('spendlens_v4', JSON.stringify({
       transactions, cards: CARDS, budgets, subscriptions,
@@ -4319,86 +4321,435 @@ function saveToStorage() {
   } catch(e) {}
 }
 
-// ============================================================
-// GOOGLE AUTH — Persistent Login
-// ============================================================
-function initGoogleAuth() {
-  if (typeof google === 'undefined') return;
-  tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: GMAIL_SCOPES,
-    callback: async (response) => {
-      if (response.error) {
-        showSyncBar('error', '❌', `Sign-in failed: ${response.error}`);
-        return;
-      }
-      gmailAccessToken = response.access_token;
-      // Store expiry for silent re-auth scheduling
-      const expiresIn = response.expires_in || 3600;
-      localStorage.setItem('spendlens_token_expiry', Date.now() + (expiresIn * 1000));
-      scheduleTokenRefresh(expiresIn);
+function saveToStorage() {
+  saveToLocalStorage();
+  scheduleFlush();  // no-op if not signed in
+}
 
-      try {
-        const profileResp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-          headers: { Authorization: `Bearer ${gmailAccessToken}` }
-        });
-        const profile = await profileResp.json();
-        gmailUser = { name: profile.name, email: profile.email, picture: profile.picture };
-        saveToStorage();
-        updateGmailUI();
-        await syncGmail(false);
-      } catch(e) {
-        showSyncBar('error', '❌', 'Could not fetch Google profile');
+// ============================================================
+// CLOUD SYNC — Supabase
+// ============================================================
+// Deletes queued between mutations and the next flush. Upserts handle
+// adds/edits; deletes need explicit row-level DELETE calls.
+const cloudDeletes = {
+  transactions: [], cards: [], subscriptions: [], card_payments: [],
+  income_entries: [], savings_goals: [], sync_history: [],
+  card_balances: [],     // [{card_id}]
+  budgets: [],           // [{key}]
+  merchant_rules: [],    // [{merchant_key}]
+  processed_emails: [],  // [{email_id, kind}]
+};
+let cloudFlushTimer = null;
+
+function initSupabase() {
+  if (!window.supabase) return false;
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
+  supabaseClient.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+      if (session) await onSupabaseSignIn(session);
+    } else if (event === 'SIGNED_OUT') {
+      onSupabaseSignOut();
+    } else if (event === 'TOKEN_REFRESHED' && session?.provider_token) {
+      gmailAccessToken = session.provider_token;
+      persistProviderToken(session);
+    }
+  });
+  return true;
+}
+
+function persistProviderToken(session) {
+  if (session?.provider_token) {
+    localStorage.setItem('spendlens_provider_token', session.provider_token);
+    const expiresAt = session.expires_at ? session.expires_at * 1000 : Date.now() + 3600000;
+    localStorage.setItem('spendlens_token_expiry', String(expiresAt));
+  }
+}
+function loadCachedProviderToken() {
+  const tok = localStorage.getItem('spendlens_provider_token');
+  const exp = parseInt(localStorage.getItem('spendlens_token_expiry') || '0');
+  return (tok && exp > Date.now()) ? tok : null;
+}
+function hasLocalData() {
+  return transactions.length > 0 || CARDS.length > 0 || subscriptions.length > 0
+      || Object.keys(budgets).length > 0 || incomeEntries.length > 0
+      || savingsGoals.length > 0;
+}
+function localGmailEmailMatches(email) {
+  try {
+    const s = localStorage.getItem('spendlens_v4');
+    if (!s) return true;
+    const d = JSON.parse(s);
+    return !d.gmailUser || !d.gmailUser.email || d.gmailUser.email === email;
+  } catch { return true; }
+}
+
+async function onSupabaseSignIn(session) {
+  currentUserId = session.user.id;
+  gmailUser = {
+    id: session.user.id,
+    email: session.user.email,
+    name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
+    picture: session.user.user_metadata?.avatar_url || session.user.user_metadata?.picture || null,
+  };
+  gmailAccessToken = session.provider_token || loadCachedProviderToken();
+  if (session.provider_token) persistProviderToken(session);
+  updateGmailUI();
+
+  // One-time migration: if cloud has never seen this user and the local data
+  // belongs to the same email, upload localStorage state with fresh UUIDs.
+  const migrationKey = 'spendlens_migrated_' + currentUserId;
+  let justMigrated = false;
+  let migrationFailed = false;
+  if (!localStorage.getItem(migrationKey)) {
+    try {
+      const { data: existingPrefs } = await supabaseClient
+        .from('user_preferences').select('user_id')
+        .eq('user_id', currentUserId).maybeSingle();
+      if (!existingPrefs && hasLocalData() && localGmailEmailMatches(session.user.email)) {
+        // Snapshot pre-migration localStorage so we can roll back if anything goes wrong
+        const preBackup = localStorage.getItem('spendlens_v4');
+        if (preBackup) localStorage.setItem('spendlens_v4_pre_migration_backup', preBackup);
+
+        showSyncBar('syncing', '☁️', 'Uploading your data to the cloud…');
+        try {
+          await migrateLocalToCloud();
+          showSyncBar('success', '✅', 'Your data is now synced to the cloud');
+          localStorage.setItem(migrationKey, '1');
+          justMigrated = true;
+        } catch (migErr) {
+          console.error('migration failed, rolling back:', migErr);
+          // Restore pre-migration localStorage so the user can retry later
+          if (preBackup) {
+            localStorage.setItem('spendlens_v4', preBackup);
+            // Reload in-memory state from the restored backup — the migration
+            // rewrote IDs in memory, so we need to revert those too.
+            loadFromStorage();
+          }
+          showSyncBar('error', '⚠️',
+            'Cloud upload failed — your local data is safe. Tap Sync to retry.');
+          migrationFailed = true;
+          // Do NOT set migrationKey → next sign-in will try again
+        }
+      } else {
+        // Nothing to migrate (new user, or cloud already populated)
+        localStorage.setItem(migrationKey, '1');
       }
+    } catch (e) {
+      console.error('migration check failed:', e);
+    }
+  }
+
+  // Pull from cloud unless we just migrated (state is already correct) OR
+  // migration failed (keep user on their local data; don't overwrite with
+  // partially-uploaded cloud state).
+  if (!justMigrated && !migrationFailed) await loadFromCloud();
+  renderAll();
+
+  // Auto-sync Gmail on load if we have a valid token
+  if (gmailAccessToken) {
+    setTimeout(() => { try { syncGmail(true); } catch (e) { console.error(e); } }, 1500);
+  }
+  if (nightlySyncEnabled) startNightlySyncTimer();
+}
+
+function onSupabaseSignOut() {
+  currentUserId = null;
+  gmailUser = null;
+  gmailAccessToken = null;
+  localStorage.removeItem('spendlens_provider_token');
+  localStorage.removeItem('spendlens_token_expiry');
+  updateGmailUI();
+}
+
+async function signInWithGoogle() {
+  if (!supabaseClient) {
+    showSyncBar('error', '❌', 'Cloud sync not ready — please refresh');
+    return;
+  }
+  const { error } = await supabaseClient.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      scopes: 'email profile ' + GMAIL_SCOPES,
+      redirectTo: window.location.origin + window.location.pathname,
+      queryParams: { access_type: 'offline', prompt: 'consent' },
     },
   });
+  if (error) showSyncBar('error', '❌', 'Sign-in failed: ' + error.message);
+  // Redirect happens; onAuthStateChange will fire when we come back.
 }
 
-// Silent re-auth: requests new token without user interaction
-function trySilentReAuth() {
-  if (!tokenClient) {
-    if (typeof google !== 'undefined') initGoogleAuth();
-    else return;
-  }
-  try {
-    tokenClient.requestAccessToken({ prompt: '' }); // Empty prompt = silent
-  } catch(e) {
-    // If silent fails, user may need to click sync
-    console.log('Silent re-auth needs user interaction');
-  }
-}
-
-// Auto-refresh token before expiry
-function scheduleTokenRefresh(expiresInSec) {
-  const refreshIn = Math.max((expiresInSec - 300) * 1000, 60000); // Refresh 5 min before expiry
-  setTimeout(() => {
-    if (gmailUser) trySilentReAuth();
-  }, refreshIn);
-}
-
-function signInWithGoogle() {
-  if (!tokenClient) {
-    if (typeof google !== 'undefined') initGoogleAuth();
-    else { showSyncBar('error', '❌', 'Google Sign-in not ready. Please refresh.'); return; }
-  }
-  tokenClient.requestAccessToken({ prompt: 'consent' });
-}
-
-function signOutGoogle() {
-  if (gmailAccessToken) {
-    try { google.accounts.oauth2.revoke(gmailAccessToken, () => {}); } catch(e){}
-  }
-  gmailAccessToken = null;
-  gmailUser = null;
-  localStorage.removeItem('spendlens_token_expiry');
-  saveToStorage();
-  updateGmailUI();
-  showSyncBar('success', '👋', 'Disconnected from Gmail');
+async function signOutGoogle() {
+  if (supabaseClient) await supabaseClient.auth.signOut();
+  showSyncBar('success', '👋', 'Signed out');
 }
 
 function handleGmailSync() {
-  if (!gmailUser || !gmailAccessToken) signInWithGoogle();
+  if (!gmailUser) signInWithGoogle();
+  else if (!gmailAccessToken) signInWithGoogle(); // token expired → re-auth
   else syncGmail(false);
+}
+
+// ─── Cloud load ──────────────────────────────────────────────
+async function loadFromCloud() {
+  if (!supabaseClient || !currentUserId) return;
+  try {
+    const [cards, txs, subs, pays, bals, buds, inc, goals, rules, hist, proc, prefs] = await Promise.all([
+      supabaseClient.from('cards').select('*').order('created_at'),
+      supabaseClient.from('transactions').select('*').order('tx_date', { ascending: false }).limit(5000),
+      supabaseClient.from('subscriptions').select('*'),
+      supabaseClient.from('card_payments').select('*').order('payment_date', { ascending: false }),
+      supabaseClient.from('card_balances').select('*'),
+      supabaseClient.from('budgets').select('*'),
+      supabaseClient.from('income_entries').select('*').order('income_date', { ascending: false }),
+      supabaseClient.from('savings_goals').select('*').order('created_at'),
+      supabaseClient.from('merchant_rules').select('*'),
+      supabaseClient.from('sync_history').select('*').order('sync_time', { ascending: false }).limit(20),
+      supabaseClient.from('processed_emails').select('*'),
+      supabaseClient.from('user_preferences').select('*').eq('user_id', currentUserId).maybeSingle(),
+    ]);
+    for (const r of [cards, txs, subs, pays, bals, buds, inc, goals, rules, hist, proc, prefs]) {
+      if (r.error) throw r.error;
+    }
+
+    CARDS = (cards.data || []).map(c => ({
+      id: c.id, issuer: c.issuer, name: c.name, last4: c.last4, color: c.color,
+      type: c.type || 'credit', creditLimit: Number(c.credit_limit) || 0, payDay: c.pay_day || 0,
+    }));
+    transactions = (txs.data || []).map(t => ({
+      id: t.id, amount: Number(t.amount), merchant: t.merchant, category: t.category,
+      card: t.card_id, date: t.tx_date, time: t.tx_time || '12:00',
+      source: t.source || 'manual',
+      subscriptionId: t.subscription_id || undefined,
+      emailId: t.email_id || undefined,
+    }));
+    subscriptions = (subs.data || []).map(s => ({
+      id: s.id, name: s.name, amount: Number(s.amount), cardId: s.card_id,
+      cycle: s.cycle || 'monthly', category: s.category, active: !!s.active,
+      autoDetected: !!s.auto_detected, debitDay: s.debit_day, addedMonth: s.added_month,
+    }));
+    cardPayments = {};
+    (pays.data || []).forEach(p => {
+      if (!cardPayments[p.card_id]) cardPayments[p.card_id] = [];
+      cardPayments[p.card_id].push({
+        id: p.id, date: p.payment_date, amount: Number(p.amount),
+        source: p.source || 'manual', note: p.note || undefined, emailId: p.email_id || undefined,
+      });
+    });
+    cardBalances = {};
+    (bals.data || []).forEach(b => {
+      cardBalances[b.card_id] = {
+        statementBalance: Number(b.statement_balance), apr: Number(b.apr),
+        minPay: Number(b.min_pay), lastUpdated: b.last_updated,
+      };
+    });
+    budgets = {};
+    (buds.data || []).forEach(b => { budgets[b.key] = Number(b.amount); });
+    incomeEntries = (inc.data || []).map(i => ({
+      id: i.id, amount: Number(i.amount), source: i.source, date: i.income_date,
+      note: i.note, frequency: i.frequency, recurring: !!i.recurring, payDay: i.pay_day || 0,
+    }));
+    savingsGoals = (goals.data || []).map(g => ({
+      id: g.id, name: g.name, target: Number(g.target),
+      savedSoFar: Number(g.saved_so_far), deadline: g.deadline,
+      icon: g.icon, color: g.color,
+      createdAt: (g.created_at || '').split('T')[0],
+    }));
+    merchantRules = {};
+    (rules.data || []).forEach(r => { merchantRules[r.merchant_key] = r.category; });
+    syncHistory = (hist.data || []).map(h => ({
+      time: h.sync_time, found: h.found, payments: h.payments, errors: h.errors, _id: h.id,
+    }));
+    processedEmailIds = new Set();
+    processedPaymentEmailIds = new Set();
+    (proc.data || []).forEach(p => {
+      if (p.kind === 'payment') processedPaymentEmailIds.add(p.email_id);
+      else processedEmailIds.add(p.email_id);
+    });
+    if (prefs.data) {
+      nightlySyncEnabled = !!prefs.data.nightly_sync_enabled;
+      yesterdayDismissed = !!prefs.data.yesterday_dismissed;
+      yesterdayDismissedDate = prefs.data.yesterday_dismissed_date || '';
+      debtStrategy = prefs.data.debt_strategy || debtStrategy;
+    }
+    saveToLocalStorage();
+  } catch (e) {
+    console.error('loadFromCloud failed:', e);
+    showSyncBar('error', '☁️', 'Cloud load failed: ' + (e.message || 'unknown'));
+  }
+}
+
+// ─── Cloud flush (debounced) ─────────────────────────────────
+function scheduleFlush(delayMs = 1500) {
+  if (!supabaseClient || !currentUserId) return;
+  if (cloudFlushTimer) clearTimeout(cloudFlushTimer);
+  cloudFlushTimer = setTimeout(() => {
+    cloudFlushTimer = null;
+    flushToCloud().catch(e => console.error('flushToCloud:', e));
+  }, delayMs);
+}
+
+async function flushToCloud() {
+  if (!supabaseClient || !currentUserId) return;
+  const uid = currentUserId;
+
+  // 1) Deletes
+  const dJobs = [];
+  const take = (k) => { const a = cloudDeletes[k]; cloudDeletes[k] = []; return a; };
+  const dT = take('transactions');   if (dT.length) dJobs.push(supabaseClient.from('transactions').delete().in('id', dT));
+  const dC = take('cards');          if (dC.length) dJobs.push(supabaseClient.from('cards').delete().in('id', dC));
+  const dS = take('subscriptions');  if (dS.length) dJobs.push(supabaseClient.from('subscriptions').delete().in('id', dS));
+  const dP = take('card_payments');  if (dP.length) dJobs.push(supabaseClient.from('card_payments').delete().in('id', dP));
+  const dI = take('income_entries'); if (dI.length) dJobs.push(supabaseClient.from('income_entries').delete().in('id', dI));
+  const dG = take('savings_goals');  if (dG.length) dJobs.push(supabaseClient.from('savings_goals').delete().in('id', dG));
+  for (const b of take('budgets'))
+    dJobs.push(supabaseClient.from('budgets').delete().eq('user_id', uid).eq('key', b.key));
+  for (const b of take('card_balances'))
+    dJobs.push(supabaseClient.from('card_balances').delete().eq('user_id', uid).eq('card_id', b.card_id));
+  for (const r of take('merchant_rules'))
+    dJobs.push(supabaseClient.from('merchant_rules').delete().eq('user_id', uid).eq('merchant_key', r.merchant_key));
+  for (const p of take('processed_emails'))
+    dJobs.push(supabaseClient.from('processed_emails').delete()
+      .eq('user_id', uid).eq('email_id', p.email_id).eq('kind', p.kind));
+  if (dJobs.length) await Promise.all(dJobs);
+
+  // 2) Upserts (bulk, parallel)
+  const jobs = [];
+  if (CARDS.length) jobs.push(supabaseClient.from('cards').upsert(CARDS.map(c => ({
+    id: c.id, user_id: uid, issuer: c.issuer, name: c.name, last4: c.last4,
+    color: c.color, type: c.type || 'credit',
+    credit_limit: Number(c.creditLimit) || 0, pay_day: Number(c.payDay) || 0,
+  }))));
+  if (subscriptions.length) jobs.push(supabaseClient.from('subscriptions').upsert(subscriptions.map(s => ({
+    id: s.id, user_id: uid, card_id: s.cardId || null, name: s.name, amount: Number(s.amount),
+    cycle: s.cycle || 'monthly', category: s.category || null, active: !!s.active,
+    auto_detected: !!s.autoDetected, debit_day: s.debitDay || null, added_month: s.addedMonth || null,
+  }))));
+  if (transactions.length) jobs.push(supabaseClient.from('transactions').upsert(transactions.map(t => ({
+    id: t.id, user_id: uid, card_id: t.card || null, subscription_id: t.subscriptionId || null,
+    amount: Number(t.amount), merchant: t.merchant, category: t.category,
+    tx_date: t.date, tx_time: t.time || '12:00',
+    source: t.source || 'manual', email_id: t.emailId || null,
+  }))));
+  const allPayments = [];
+  Object.entries(cardPayments || {}).forEach(([cardId, arr]) => {
+    (arr || []).forEach(p => {
+      if (!p.id) p.id = crypto.randomUUID();
+      allPayments.push({
+        id: p.id, user_id: uid, card_id: cardId, payment_date: p.date,
+        amount: Number(p.amount), source: p.source || 'manual',
+        note: p.note || null, email_id: p.emailId || null,
+      });
+    });
+  });
+  if (allPayments.length) jobs.push(supabaseClient.from('card_payments').upsert(allPayments));
+  const balRows = Object.entries(cardBalances || {}).map(([cardId, b]) => ({
+    user_id: uid, card_id: cardId,
+    statement_balance: Number(b.statementBalance) || 0,
+    apr: Number(b.apr) || 0, min_pay: Number(b.minPay) || 0,
+    last_updated: b.lastUpdated || null,
+  }));
+  if (balRows.length) jobs.push(supabaseClient.from('card_balances').upsert(balRows));
+  const budRows = Object.entries(budgets || {}).map(([key, amt]) => ({
+    user_id: uid, key, amount: Number(amt),
+  }));
+  if (budRows.length) jobs.push(supabaseClient.from('budgets').upsert(budRows));
+  if (incomeEntries.length) jobs.push(supabaseClient.from('income_entries').upsert(incomeEntries.map(i => ({
+    id: i.id, user_id: uid, amount: Number(i.amount), source: i.source, income_date: i.date,
+    note: i.note || null, frequency: i.frequency || 'once',
+    recurring: !!i.recurring, pay_day: Number(i.payDay) || 0,
+  }))));
+  if (savingsGoals.length) jobs.push(supabaseClient.from('savings_goals').upsert(savingsGoals.map(g => ({
+    id: g.id, user_id: uid, name: g.name, target: Number(g.target),
+    saved_so_far: Number(g.savedSoFar) || 0, deadline: g.deadline || null,
+    icon: g.icon || null, color: g.color || null,
+  }))));
+  const ruleRows = Object.entries(merchantRules || {}).map(([key, cat]) => ({
+    user_id: uid, merchant_key: key, category: cat,
+  }));
+  if (ruleRows.length) jobs.push(supabaseClient.from('merchant_rules').upsert(ruleRows));
+  if (syncHistory.length) jobs.push(supabaseClient.from('sync_history').upsert(syncHistory.map(h => {
+    if (!h._id) h._id = crypto.randomUUID();
+    return {
+      id: h._id, user_id: uid, sync_time: h.time,
+      found: h.found || 0, payments: h.payments || 0, errors: h.errors || 0,
+    };
+  })));
+  const procRows = [];
+  processedEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'transaction' }));
+  processedPaymentEmailIds.forEach(id => procRows.push({ user_id: uid, email_id: id, kind: 'payment' }));
+  if (procRows.length) jobs.push(supabaseClient.from('processed_emails').upsert(procRows));
+
+  jobs.push(supabaseClient.from('user_preferences').upsert({
+    user_id: uid, theme: document.body.dataset.theme || 'light',
+    debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
+    yesterday_dismissed: !!yesterdayDismissed,
+    yesterday_dismissed_date: yesterdayDismissedDate || null,
+  }));
+
+  const results = await Promise.all(jobs);
+  const errs = results.filter(r => r && r.error);
+  if (errs.length) {
+    errs.forEach(r => console.error('flush error:', r.error));
+    const e = new Error('cloud flush had ' + errs.length + ' error(s): ' +
+      errs.map(r => r.error?.message || 'unknown').join('; '));
+    e.partialFailures = errs;
+    throw e;
+  }
+}
+
+// ─── One-time migration: local ints → cloud UUIDs ───────────
+async function migrateLocalToCloud() {
+  const cardMap = {};    // old id → new uuid
+  const subMap = {};     // old int id → new uuid
+
+  CARDS.forEach(c => {
+    const newId = crypto.randomUUID();
+    cardMap[c.id] = newId;
+    c.id = newId;
+  });
+  subscriptions.forEach(s => {
+    const newId = crypto.randomUUID();
+    subMap[s.id] = newId;
+    s.id = newId;
+    if (s.cardId != null && cardMap[s.cardId]) s.cardId = cardMap[s.cardId];
+  });
+  transactions.forEach(t => {
+    t.id = crypto.randomUUID();
+    if (t.card != null && cardMap[t.card]) t.card = cardMap[t.card];
+    if (t.subscriptionId != null && subMap[t.subscriptionId]) t.subscriptionId = subMap[t.subscriptionId];
+  });
+  incomeEntries.forEach(i => { i.id = crypto.randomUUID(); });
+  savingsGoals.forEach(g => { g.id = crypto.randomUUID(); });
+
+  const newCardPayments = {};
+  Object.entries(cardPayments || {}).forEach(([oldCardId, arr]) => {
+    const newCardId = cardMap[oldCardId] || oldCardId;
+    newCardPayments[newCardId] = (arr || []).map(p => ({
+      id: p.id || crypto.randomUUID(),
+      date: p.date, amount: Number(p.amount),
+      source: p.source || 'manual', note: p.note, emailId: p.emailId,
+    }));
+  });
+  cardPayments = newCardPayments;
+
+  const newCardBalances = {};
+  Object.entries(cardBalances || {}).forEach(([oldCardId, bal]) => {
+    const newCardId = cardMap[oldCardId] || oldCardId;
+    newCardBalances[newCardId] = bal;
+  });
+  cardBalances = newCardBalances;
+
+  const newBudgets = {};
+  Object.entries(budgets || {}).forEach(([key, amt]) => {
+    if (key === 'overall' || key.startsWith('cat-')) newBudgets[key] = amt;
+    else newBudgets[cardMap[key] || key] = amt;
+  });
+  budgets = newBudgets;
+
+  saveToLocalStorage();
+  await flushToCloud();
 }
 
 // ============================================================
@@ -4510,7 +4861,6 @@ async function syncGmail(silent = false) {
         const tx = parseEmailToTransaction(msg, issuer, issuerCards);
         if (tx) {
           transactions.push(tx);
-          nextId++;
           totalNew++;
         }
         processedEmailIds.add(msgId);
@@ -4716,7 +5066,7 @@ function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId)
   }
 
   return {
-    id: nextId, amount, merchant, card: cardId,
+    id: crypto.randomUUID(), amount, merchant, card: cardId,
     category: autoCategory(merchant),
     date, time, source: 'gmail', emailId: msgId,
   };
@@ -4803,7 +5153,7 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   const time = extractTime(dateHeader);
 
   return {
-    id: nextId, amount, merchant, card: cardId,
+    id: crypto.randomUUID(), amount, merchant, card: cardId,
     category: autoCategory(merchant),
     date, time, source: 'gmail', emailId: msgId,
   };
@@ -4908,7 +5258,7 @@ function detectSubscriptions() {
       if (!existingSub) {
         const avgAmount = data.amounts[data.amounts.length-1]; // Use most recent
         subscriptions.push({
-          id: nextSubId++,
+          id: crypto.randomUUID(),
           name: data.name,
           amount: avgAmount,
           cardId: [...data.cards][0],
@@ -4963,7 +5313,7 @@ function autoPostSubscriptions() {
 
     if (!alreadyPosted) {
       transactions.push({
-        id: nextId++,
+        id: crypto.randomUUID(),
         amount: sub.amount,
         merchant: sub.name,
         card: sub.cardId,
@@ -5027,6 +5377,7 @@ function reassignCategory(txId, newCatId) {
 function deleteTransaction(txId) {
   if (!confirm('Delete this transaction?')) return;
   transactions = transactions.filter(t => t.id !== txId);
+  cloudDeletes.transactions.push(txId);
   saveToStorage();
   document.getElementById('reassignOverlay')?.remove();
   renderAll();
@@ -5200,6 +5551,10 @@ function getCardRewardsHTML(card) {
 function removeCard(cardId) {
   if (!confirm('Remove this card? Existing transactions will be kept.')) return;
   CARDS = CARDS.filter(c => c.id !== cardId);
+  // Server-side FK cascades handle card_payments + card_balances; clean locally too.
+  delete cardPayments[cardId];
+  delete cardBalances[cardId];
+  cloudDeletes.cards.push(cardId);
   saveToStorage();
   document.getElementById('editCardOverlay')?.remove();
   renderAll();
@@ -5288,6 +5643,7 @@ function renderBudgets() {
 
 function deleteBudget(key) {
   delete budgets[key];
+  cloudDeletes.budgets.push({ key });
   saveToStorage();
   renderBudgets();
   renderAll();
@@ -5344,7 +5700,7 @@ function renderSubscriptions() {
       </div>
       <div class="sub-amount">$${sub.amount.toFixed(2)}<span style="font-size:11px;color:var(--text-muted)">/${sub.cycle==='yearly'?'yr':'mo'}</span></div>
       <div class="sub-actions">
-        <button class="sub-action-btn cancel" onclick="cancelSubscription(${sub.id})">✕</button>
+        <button class="sub-action-btn cancel" onclick="cancelSubscription('${sub.id}')">✕</button>
       </div>
     </div>`;
   }).join('');
@@ -5378,7 +5734,7 @@ function saveSubscription() {
   const category = document.getElementById('subCategory').value;
   const debitDay = parseInt(document.getElementById('subDebitDay').value) || 1;
   if (!name || !amount) { alert('Please fill name and amount'); return; }
-  subscriptions.push({ id: nextSubId++, name, amount, cardId, cycle: subCycle, category, active: true, autoDetected: false, debitDay, addedMonth: new Date().getMonth() });
+  subscriptions.push({ id: crypto.randomUUID(), name, amount, cardId, cycle: subCycle, category, active: true, autoDetected: false, debitDay, addedMonth: new Date().getMonth() });
   saveToStorage();
   closeModal('addSubModal');
   renderSubscriptions();
@@ -5391,7 +5747,7 @@ function cancelSubscription(subId) {
   const sub = subscriptions.find(s => s.id === subId);
   if (!sub) return;
   if (confirm(`Mark "${sub.name}" as cancelled?`)) {
-    sub.active = false;
+    sub.active = false; // soft-delete — the upsert in flushToCloud persists this
     saveToStorage();
     renderSubscriptions();
   }
@@ -5702,7 +6058,7 @@ function renderTransactions(f) {
       const card = CARDS.find(c=>c.id===tx.card);
       // Check if this is a subscription
       const isSub = subscriptions.some(s => s.active && tx.merchant.toLowerCase().includes(s.name.toLowerCase().substring(0,5)));
-      return `<div class="tx-item ${tx.source==='gmail'?'gmail-sourced':''}" onclick="openReassignModal(${tx.id})">
+      return `<div class="tx-item ${tx.source==='gmail'?'gmail-sourced':''}" onclick="openReassignModal('${tx.id}')">
         <div class="tx-icon" style="background:${cat.color}22">${cat.icon}</div>
         <div class="tx-details">
           <div class="tx-merchant">${tx.merchant}</div>
@@ -5836,7 +6192,7 @@ function saveTransaction() {
   const date=document.getElementById('txDate').value;
   const time=document.getElementById('txTime').value||'12:00';
   if(!amount||!merchant||!date||!selectedCardInModal||!selectedCatInModal){alert('Please fill in all fields');return;}
-  transactions.push({id:nextId++,amount,merchant,card:selectedCardInModal,category:selectedCatInModal,date,time,source:'manual'});
+  transactions.push({id:crypto.randomUUID(),amount,merchant,card:selectedCardInModal,category:selectedCatInModal,date,time,source:'manual'});
   saveToStorage(); closeModal('addModal');
   // Parse date string directly to avoid UTC timezone offset issue
   const parts=date.split('-'); currentYear=parseInt(parts[0]); currentMonth=parseInt(parts[1])-1;
@@ -5951,7 +6307,7 @@ function saveNewCard() {
   if(!issuer||!last4||last4.length!==4){alert('Please fill issuer and last 4 digits');return;}
   const fallbackName = newCardType === 'bank' ? `${issuer} Checking` : `${issuer} Card`;
   const name=customName||cardName||fallbackName;
-  const id=`${issuer}-${last4}-${nextCardId++}`;
+  const id=crypto.randomUUID();
   CARDS.push({id,issuer,name,last4,color:newCardColor,type:newCardType,creditLimit,payDay});
   saveToStorage(); closeModal('addCardModal'); renderAll(); renderSettingsCards();
   const icon = newCardType === 'bank' ? '🏦' : newCardType === 'debit' ? '🏧' : '💳';
@@ -6058,12 +6414,12 @@ function saveIncome(){
   let payDay=0, recurring=false;
   if(frequency==='monthly'){recurring=true;payDay=new Date(date + 'T12:00:00').getDate();}
   else if(frequency==='biweekly'||frequency==='weekly'){recurring=true;payDay=0;}// use date as anchor
-  incomeEntries.push({id:nextIncomeId++,amount,source,date,note,frequency,recurring,payDay});
+  incomeEntries.push({id:crypto.randomUUID(),amount,source,date,note,frequency,recurring,payDay});
   saveToStorage(); closeModal('addIncomeModal'); renderFinanceHub();
   showSyncBar('success','💵',`Income of <strong>$${amount.toLocaleString()}</strong> logged`);
 }
 
-function deleteIncome(id){incomeEntries=incomeEntries.filter(e=>e.id!==id);saveToStorage();renderFinanceHub();}
+function deleteIncome(id){cloudDeletes.income_entries.push(id);incomeEntries=incomeEntries.filter(e=>e.id!==id);saveToStorage();renderFinanceHub();}
 
 function getMonthIncome(year,month){
   const now=new Date();
@@ -6148,7 +6504,7 @@ function renderFinanceHub(){
       return e.date && e.date.startsWith(incMonthPrefix);
     });
     if(!entries.length){incEl.innerHTML=`<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius-sm)">No income logged. Tap + to add.</div>`;}
-    else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+$${e.amount.toLocaleString('en-US',{minimumFractionDigits:2})}</div><span class="income-del" onclick="deleteIncome(${e.id})">✕</span></div>`).join('');
+    else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+$${e.amount.toLocaleString('en-US',{minimumFractionDigits:2})}</div><span class="income-del" onclick="deleteIncome('${e.id}')">✕</span></div>`).join('');
   }
   renderNetWorth(totalSpent);
 }
@@ -6370,11 +6726,11 @@ function saveGoal(){
   const target=parseFloat(document.getElementById('goalTarget').value);
   const savedSoFar=parseFloat(document.getElementById('goalSaved').value)||0;
   const deadline=document.getElementById('goalDeadline').value;
-  const editId=parseInt(document.getElementById('goalEditId').value)||null;
+  const editId=document.getElementById('goalEditId').value||null;
   if(!name||!target||target<=0){alert('Please enter name and target');return;}
   const colors=['#6c5ce7','#00d2a0','#4dabf7','#ffd43b','#ff6b6b','#e64980','#ff922b','#51cf66'];
   if(editId){const g=savingsGoals.find(g=>g.id===editId);if(g){g.name=name;g.target=target;g.savedSoFar=savedSoFar;g.deadline=deadline;g.icon=selectedGoalIcon;}}
-  else savingsGoals.push({id:nextGoalId++,name,target,savedSoFar,deadline,icon:selectedGoalIcon,color:colors[savingsGoals.length%colors.length],createdAt:new Date().toISOString().split('T')[0]});
+  else savingsGoals.push({id:crypto.randomUUID(),name,target,savedSoFar,deadline,icon:selectedGoalIcon,color:colors[savingsGoals.length%colors.length],createdAt:new Date().toISOString().split('T')[0]});
   saveToStorage();closeModal('addGoalModal');renderGoals();showSyncBar('success','🎯',`Goal <strong>${name}</strong> saved`);
 }
 function addToGoal(goalId){
@@ -6384,7 +6740,7 @@ function addToGoal(goalId){
   g.savedSoFar=Math.min((g.savedSoFar||0)+amt,g.target);saveToStorage();renderGoals();
   showSyncBar('success','💰',`$${amt.toFixed(2)} added to <strong>${g.name}</strong>`);
 }
-function deleteGoal(goalId){if(!confirm('Delete this goal?'))return;savingsGoals=savingsGoals.filter(g=>g.id!==goalId);saveToStorage();renderGoals();}
+function deleteGoal(goalId){if(!confirm('Delete this goal?'))return;cloudDeletes.savings_goals.push(goalId);savingsGoals=savingsGoals.filter(g=>g.id!==goalId);saveToStorage();renderGoals();}
 function renderGoals(){
   const el=document.getElementById('goalsList');if(!el)return;
   if(!savingsGoals.length){el.innerHTML=`<div style="text-align:center;padding:36px 20px;color:var(--text-muted);border:1px dashed var(--border);border-radius:var(--radius-sm)"><div style="font-size:34px;margin-bottom:10px">🎯</div><div style="font-size:14px;font-weight:600;color:var(--text-dim);margin-bottom:5px">No goals yet</div><div style="font-size:13px">Tap "+ New Goal" to get started</div></div>`;renderPayYourself();return;}
@@ -6393,7 +6749,7 @@ function renderGoals(){
     const remaining=g.target-(g.savedSoFar||0);
     let daysLeft=null,perMonth=null,onTrack=null;
     if(g.deadline){const dead=new Date(g.deadline+'T23:59:59');const tod=new Date();daysLeft=Math.max(Math.ceil((dead-tod)/86400000),0);const monthsLeft=Math.max(daysLeft/30.4,0.1);perMonth=remaining/monthsLeft;const avail=Math.max(getMonthIncome(currentYear,currentMonth)-getMonthTransactions(currentYear,currentMonth,'all').reduce((s,tx)=>s+tx.amount,0),0);onTrack=avail>=perMonth;}
-    return `<div class="goal-card"><div class="goal-header"><div class="goal-icon-wrap" style="background:${g.color}22">${g.icon||'🎯'}</div><div style="flex:1"><div class="goal-name">${g.name}</div><div class="goal-deadline">${g.deadline?`📅 ${new Date(g.deadline+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft!==null?' · '+daysLeft+'d':''}`:' No deadline'}</div></div><div class="goal-actions"><button class="goal-action-btn" onclick="addToGoal(${g.id})">+ Add</button><button class="goal-action-btn" onclick="openGoalModal(${g.id})">Edit</button><button class="goal-action-btn" style="color:var(--red)" onclick="deleteGoal(${g.id})">✕</button></div></div><div class="goal-progress-row"><span style="font-weight:600">$${(g.savedSoFar||0).toLocaleString('en-US',{minimumFractionDigits:0})} saved</span><span>of $${g.target.toLocaleString()} · ${pct.toFixed(0)}%</span></div><div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%;background:${g.color}"></div></div><div class="goal-stats"><div class="goal-stat"><div class="goal-stat-val" style="color:var(--red)">$${remaining.toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="goal-stat-lbl">Remaining</div></div><div class="goal-stat"><div class="goal-stat-val" style="color:var(--blue)">${perMonth?'$'+perMonth.toFixed(0):'—'}</div><div class="goal-stat-lbl">Per Month</div></div><div class="goal-stat"><div class="goal-stat-val">${onTrack===null?'—':onTrack?'✅':'⚠️'}</div><div class="goal-stat-lbl">On Track</div></div></div></div>`;
+    return `<div class="goal-card"><div class="goal-header"><div class="goal-icon-wrap" style="background:${g.color}22">${g.icon||'🎯'}</div><div style="flex:1"><div class="goal-name">${g.name}</div><div class="goal-deadline">${g.deadline?`📅 ${new Date(g.deadline+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft!==null?' · '+daysLeft+'d':''}`:' No deadline'}</div></div><div class="goal-actions"><button class="goal-action-btn" onclick="addToGoal('${g.id}')">+ Add</button><button class="goal-action-btn" onclick="openGoalModal('${g.id}')">Edit</button><button class="goal-action-btn" style="color:var(--red)" onclick="deleteGoal('${g.id}')">✕</button></div></div><div class="goal-progress-row"><span style="font-weight:600">$${(g.savedSoFar||0).toLocaleString('en-US',{minimumFractionDigits:0})} saved</span><span>of $${g.target.toLocaleString()} · ${pct.toFixed(0)}%</span></div><div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%;background:${g.color}"></div></div><div class="goal-stats"><div class="goal-stat"><div class="goal-stat-val" style="color:var(--red)">$${remaining.toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="goal-stat-lbl">Remaining</div></div><div class="goal-stat"><div class="goal-stat-val" style="color:var(--blue)">${perMonth?'$'+perMonth.toFixed(0):'—'}</div><div class="goal-stat-lbl">Per Month</div></div><div class="goal-stat"><div class="goal-stat-val">${onTrack===null?'—':onTrack?'✅':'⚠️'}</div><div class="goal-stat-lbl">On Track</div></div></div></div>`;
   }).join('');
   renderPayYourself();
 }
@@ -6667,7 +7023,11 @@ function deletePayment(cardId, pDate, pAmount) {
   if (!confirm('Remove this payment record?')) return;
   if (cardPayments[cardId]) {
     const idx = cardPayments[cardId].findIndex(p => p.date === pDate && Math.abs(p.amount - pAmount) < 0.01);
-    if (idx !== -1) cardPayments[cardId].splice(idx, 1);
+    if (idx !== -1) {
+      const removed = cardPayments[cardId][idx];
+      if (removed?.id) cloudDeletes.card_payments.push(removed.id);
+      cardPayments[cardId].splice(idx, 1);
+    }
     saveToStorage();
     renderPaymentsPage();
     showSyncBar('success', '🗑️', 'Payment removed');
@@ -6676,11 +7036,12 @@ function deletePayment(cardId, pDate, pAmount) {
 
 // SpendLens v5.0 — Finance Edition ═════════════════════
 
-// Init Google Auth once GIS loads
+// Init Supabase once the SDK loads; the auth state listener takes it from there
 window.addEventListener('load', () => {
   const check = setInterval(() => {
-    if (typeof google !== 'undefined' && google.accounts) { clearInterval(check); initGoogleAuth(); }
-  }, 300);
+    if (window.supabase) { clearInterval(check); initSupabase(); }
+  }, 100);
+  setTimeout(() => clearInterval(check), 10000); // give up after 10s (offline)
 });
 
 init();
