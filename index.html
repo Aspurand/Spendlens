@@ -5170,6 +5170,12 @@ async function syncGmail(silent = false) {
   syncHistory.unshift(syncRecord);
   if (syncHistory.length > 20) syncHistory.pop();
 
+  // Amex (and some other issuers) can send multiple emails for one charge
+  // — e.g. "Large purchase" alert + the standard "Transaction" alert, or
+  // pending + posted. Each has its own message ID so processedEmailIds
+  // can't catch it; the dupes share date+merchant+amount+card instead.
+  dedupeTransactions();
+
   // Auto-detect subscriptions from transaction patterns
   detectSubscriptions();
 
