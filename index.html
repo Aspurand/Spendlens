@@ -775,8 +775,29 @@ body {
   padding: 10px 12px;
   cursor: pointer;
   transition: all 0.2s;
+  -webkit-tap-highlight-color: transparent;
 }
 .cat-card:active { transform: scale(0.97); }
+.cat-card.selected {
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 9px 11px; /* compensate for thicker border so layout doesn't shift */
+}
+.tx-filter-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 4px 0 12px; padding: 7px 14px;
+  background: var(--accent-soft); color: var(--accent-ink);
+  border: 1px solid var(--accent); border-radius: 999px;
+  font: inherit; font-size: 12px; font-weight: 600;
+  font-family: var(--font-serif), serif;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.tx-filter-pill:hover { background: var(--accent); color: #fff; }
+.tx-filter-pill .tx-filter-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: rgba(184,83,43,0.18); font-size: 10px; line-height: 1;
+}
 .cat-icon { display: none; }
 .cat-name {
   font-size: 9px; color: var(--text-muted);
@@ -3615,7 +3636,7 @@ select.form-input {
     <div class="yesterday-banner-amount" id="yesterdayAmount">$0.00</div>
     <div class="yesterday-banner-detail" id="yesterdayDetail"></div>
   </div>
-  <span class="yesterday-banner-close" onclick="yesterdayDismissed=true;yesterdayDismissedDate=new Date().toISOString().split('T')[0];saveToStorage();document.getElementById('yesterdayBanner').classList.remove('visible')">✕</span>
+  <span class="yesterday-banner-close" onclick="yesterdayDismissed=true;yesterdayDismissedDate=ptDateStr();saveToStorage();document.getElementById('yesterdayBanner').classList.remove('visible')">✕</span>
 </div>
 
 <!-- ============ DASHBOARD ============ -->
@@ -4318,6 +4339,46 @@ const SUPABASE_URL = 'https://pqkdsznxffwrbibkiape.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxa2Rzem54ZmZ3cmJpYmtpYXBlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3MzMyNjcsImV4cCI6MjA5MjMwOTI2N30.R7oaJIR0Xg4AhmvDp41H9emTyZGxSKt0AFenueb88L4';
 let supabaseClient = null;
 let supabaseAccessToken = (typeof localStorage !== 'undefined' ? localStorage.getItem('spendlens_sb_token') : null) || null;
+
+// ============================================================
+// TIMEZONE — pinned to Pacific (user lives in California)
+// All "today" / "yesterday" / nightly-refresh logic uses these
+// helpers so the calendar date matches what the user sees, even
+// if the device is in a different timezone (e.g. travel).
+// ============================================================
+const SPENDLENS_TZ = 'America/Los_Angeles';
+
+function ptDateStr(d) {
+  // Returns YYYY-MM-DD in Pacific time. Defaults to "now".
+  // en-CA locale formats as YYYY-MM-DD natively.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: SPENDLENS_TZ, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(d || new Date());
+}
+
+function ptTimeStr(d) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: SPENDLENS_TZ, hour: '2-digit', minute: '2-digit', hour12: false
+  }).format(d || new Date());
+}
+
+function ptDateOffset(days) {
+  // YYYY-MM-DD that is `days` away from today in Pacific time.
+  // Built from PT today's components + Date.UTC at noon to avoid DST edges.
+  const [y, m, d] = ptDateStr().split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days, 12)).toISOString().slice(0, 10);
+}
+
+function msUntilNextPacificMidnight() {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: SPENDLENS_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date()).map(p => [p.type, p.value]));
+  let h = +parts.hour; if (h === 24) h = 0;
+  const m = +parts.minute, s = +parts.second;
+  const secs = ((24 - h) * 3600 - m * 60 - s) % 86400;
+  return (secs || 86400) * 1000;
+}
 let currentUserId = null;
 
 // ============================================================
@@ -4471,6 +4532,7 @@ let selectedGoalIcon = '🎯';
 let currentMonth = new Date().getMonth();
 let currentYear = new Date().getFullYear();
 let selectedCard = 'all';
+let selectedCategory = null; // null = no filter; otherwise a category id (e.g. 'shopping')
 let trendView = 'overall';
 let trendChart = null, dailyChart = null, pieChart = null;
 let selectedCardInModal = '';
@@ -4511,7 +4573,7 @@ function init() {
   const dateStr = new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'});
   const hdEl = document.getElementById('headerDate'); if(hdEl) hdEl.textContent = dateStr;
   const hd2 = document.getElementById('headerDate2'); if(hd2) hd2.textContent = dateStr;
-  document.getElementById('txDate').value = new Date().toISOString().split('T')[0];
+  document.getElementById('txDate').value = ptDateStr();
   updateMonthLabel();
   renderAll();
   // NOTE: autoPostSubscriptions is deliberately NOT called here anymore.
@@ -4568,8 +4630,7 @@ function loadFromStorage() {
 const PAYMENT_RETENTION_DAYS = 30;
 function prunePayments() {
   if (!cardPayments) return;
-  const cutoff = new Date(Date.now() - PAYMENT_RETENTION_DAYS * 86400000)
-    .toISOString().split('T')[0];
+  const cutoff = ptDateOffset(-PAYMENT_RETENTION_DAYS);
   for (const cardId in cardPayments) {
     const lastUpdated = (cardBalances[cardId] || {}).lastUpdated || '';
     const kept = [];
@@ -5344,23 +5405,15 @@ function updateNightlySyncUI() {
   dot.classList.toggle('active', nightlySyncEnabled);
   dot.classList.toggle('inactive', !nightlySyncEnabled);
   if (nightlySyncEnabled) {
-    const nextSync = getNextMidnight();
-    text.textContent = `Active · Next sync: ${nextSync.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'})}`;
+    text.textContent = `Active · Next sync: 12:00 AM PT`;
   } else {
     text.textContent = 'Disabled';
   }
 }
 
-function getNextMidnight() {
-  const now = new Date();
-  const midnight = new Date(now);
-  midnight.setHours(24, 0, 0, 0);
-  return midnight;
-}
-
 function startNightlySyncTimer() {
   clearNightlySyncTimer();
-  const msToMidnight = getNextMidnight().getTime() - Date.now();
+  const msToMidnight = msUntilNextPacificMidnight();
   nightlySyncTimer = setTimeout(async () => {
     if (nightlySyncEnabled && gmailUser) {
       if (!gmailAccessToken) trySilentReAuth();
@@ -5385,14 +5438,14 @@ function clearNightlySyncTimer() {
 
 function showYesterdaySummary() {
   // Reset dismissed flag if it was from a different day
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = ptDateStr();
   if (yesterdayDismissed && yesterdayDismissedDate !== todayStr) {
     yesterdayDismissed = false;
     saveToStorage();
   }
   if (yesterdayDismissed) return;
-  const yesterday = new Date(Date.now() - 86400000);
-  const yDate = yesterday.toISOString().split('T')[0];
+  const yDate = ptDateOffset(-1);
+  const yesterday = new Date(yDate + 'T12:00:00');  // for the human-readable label below
   const yTx = transactions.filter(tx => tx.date === yDate);
   if (yTx.length === 0) return;
   const yTotal = yTx.reduce((s,tx) => s + tx.amount, 0);
@@ -5767,9 +5820,9 @@ function cleanMerchant(m) {
 }
 
 function extractDate(fullText, dateHeader) {
-  let date = new Date().toISOString().split('T')[0];
+  let date = ptDateStr();
   if (dateHeader) {
-    try { const d = new Date(dateHeader); if (!isNaN(d)) date = d.toISOString().split('T')[0]; } catch(e) {}
+    try { const d = new Date(dateHeader); if (!isNaN(d)) date = ptDateStr(d); } catch(e) {}
   }
   const datePatterns = [
     /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/,
@@ -5786,7 +5839,7 @@ function extractDate(fullText, dateHeader) {
         } else {
           parsed = new Date(`${m[1]} ${m[2]}, ${m[3]}`);
         }
-        if (!isNaN(parsed)) { date = parsed.toISOString().split('T')[0]; break; }
+        if (!isNaN(parsed)) { date = ptDateStr(parsed); break; }
       } catch(e) {}
     }
   }
@@ -5795,7 +5848,7 @@ function extractDate(fullText, dateHeader) {
 
 function extractTime(dateHeader) {
   if (dateHeader) {
-    try { const d = new Date(dateHeader); if (!isNaN(d)) return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; } catch(e) {}
+    try { const d = new Date(dateHeader); if (!isNaN(d)) return ptTimeStr(d); } catch(e) {}
   }
   return '12:00';
 }
@@ -6502,7 +6555,11 @@ function getMonthTransactions(year, month, card) {
     return tx.date && tx.date.startsWith(monthStr) && (!card || card === 'all' || tx.card === card);
   }).sort((a,b) => b.date.localeCompare(a.date) || (b.time || '').localeCompare(a.time || ''));
 }
-function getFiltered() { return getMonthTransactions(currentYear, currentMonth, selectedCard); }
+function getFiltered(skipCategoryFilter) {
+  let r = getMonthTransactions(currentYear, currentMonth, selectedCard);
+  if (!skipCategoryFilter && selectedCategory) r = r.filter(tx => tx.category === selectedCategory);
+  return r;
+}
 
 // ============================================================
 // RENDER ALL
@@ -6510,8 +6567,20 @@ function getFiltered() { return getMonthTransactions(currentYear, currentMonth, 
 function renderAll() {
   const f = getFiltered();
   renderTotal(f); renderCards(); renderTrendChart(); renderDailyChart(f);
-  renderCategories(f); renderTransactions(f);
+  // Category cards always show all-category totals (so user can switch),
+  // even if a category filter is active on the rest of the dashboard.
+  renderCategories(getFiltered(true));
+  renderTransactions(f);
   renderSyncHistory(); renderSettingsCards();
+}
+
+function selectCategory(catId) {
+  // Tap same card again, or pass null, to clear the filter.
+  selectedCategory = (catId === null || catId === selectedCategory) ? null : catId;
+  renderAll();
+  if (selectedCategory) {
+    document.getElementById('transactionsList')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 function renderTotal(f) {
@@ -6652,7 +6721,9 @@ function renderCategories(f) {
   const sorted = [...CATEGORIES].sort((a,b) => catTotals[b.id]-catTotals[a.id]);
   c.innerHTML = sorted.map(cat => {
     const t = catTotals[cat.id]; const p = mx>0?(t/mx*100):0;
-    return `<div class="cat-card"><div class="cat-icon">${cat.icon}</div><div class="cat-name">${cat.name}</div>
+    const sel = selectedCategory === cat.id ? ' selected' : '';
+    return `<div class="cat-card${sel}" onclick="selectCategory('${cat.id}')" role="button" tabindex="0">
+      <div class="cat-icon">${cat.icon}</div><div class="cat-name">${cat.name}</div>
       <div class="cat-amount">$${t.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
       <div class="cat-bar"><div class="cat-bar-fill" style="width:${p}%;background:${cat.color}"></div></div></div>`;
   }).join('');
@@ -6660,18 +6731,24 @@ function renderCategories(f) {
 
 function renderTransactions(f) {
   const c = document.getElementById('transactionsList');
+  // Filter pill — shows the active category filter and clears on tap.
+  let pill = '';
+  if (selectedCategory) {
+    const cat = CATEGORIES.find(x => x.id === selectedCategory);
+    if (cat) pill = `<button class="tx-filter-pill" onclick="selectCategory(null)" aria-label="Clear filter">${cat.icon} ${cat.name} · ${f.length} tx <span class="tx-filter-x">✕</span></button>`;
+  }
   if (f.length === 0) {
-    c.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${gmailUser?'🔄':'📱'}</div>
-      <div class="empty-state-title">${gmailUser?'No transactions found':'No transactions yet'}</div>
-      <div class="empty-state-desc">${gmailUser?'Tap "Sync Now" to check for new emails':'Tap + to add or connect Gmail to auto-import'}</div></div>`;
+    c.innerHTML = pill + `<div class="empty-state"><div class="empty-state-icon">${selectedCategory?'🔍':(gmailUser?'🔄':'📱')}</div>
+      <div class="empty-state-title">${selectedCategory?'No transactions in this category':(gmailUser?'No transactions found':'No transactions yet')}</div>
+      <div class="empty-state-desc">${selectedCategory?'This month, anyway. Tap the pill above to clear.':(gmailUser?'Tap "Sync Now" to check for new emails':'Tap + to add or connect Gmail to auto-import')}</div></div>`;
     return;
   }
   const grouped = {};
   f.forEach(tx => { if (!grouped[tx.date]) grouped[tx.date]=[]; grouped[tx.date].push(tx); });
   const dates = Object.keys(grouped).sort().reverse();
-  const today = new Date().toISOString().split('T')[0];
-  const yesterday = new Date(Date.now()-86400000).toISOString().split('T')[0];
-  c.innerHTML = dates.map(date => {
+  const today = ptDateStr();
+  const yesterday = ptDateOffset(-1);
+  c.innerHTML = pill + dates.map(date => {
     const d = new Date(date+'T12:00:00');
     let label = d.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'});
     if (date===today) label='Today'; if (date===yesterday) label='Yesterday';
@@ -6743,7 +6820,7 @@ function openAddModal() {
   document.getElementById('parsedPreview').classList.remove('visible');
   document.getElementById('txAmountInput').value='';
   document.getElementById('txMerchant').value='';
-  document.getElementById('txDate').value=new Date().toISOString().split('T')[0];
+  document.getElementById('txDate').value=ptDateStr();
   document.getElementById('txTime').value='12:00';
   document.getElementById('cardSelectGroup').innerHTML=CARDS.map(card=>
     `<button class="card-select-btn" onclick="selectModalCard('${card.id}',this)" style="border-left:3px solid ${card.color}">${card.name} (${card.last4})</button>`).join('');
@@ -6887,7 +6964,7 @@ function exportData() {
   const rows=transactions.map(tx=>{const card=CARDS.find(c=>c.id===tx.card);const cat=CATEGORIES.find(c=>c.id===tx.category);return[tx.date,tx.time,tx.merchant,tx.amount.toFixed(2),card?.name,card?.last4,cat?.name,tx.source||'manual']});
   let csv=headers.join(',')+'\n';rows.forEach(r=>{csv+=r.map(v=>`"${v}"`).join(',')+'\n'});
   const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download=`spendlens_${new Date().toISOString().split('T')[0]}.csv`;a.click();URL.revokeObjectURL(url);
+  const a=document.createElement('a');a.href=url;a.download=`spendlens_${ptDateStr()}.csv`;a.click();URL.revokeObjectURL(url);
 }
 
 function clearAllData() {
@@ -6990,7 +7067,7 @@ function openLogPaymentModal(cardId){
   const card=CARDS.find(c=>c.id===cardId);if(!card)return;
   const overlay=document.createElement('div');overlay.className='modal-overlay open';overlay.id='logPaymentOverlay';
   overlay.onclick=(e)=>{if(e.target===overlay)overlay.remove();};
-  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + 80px + var(--safe-bottom))"><div class="modal-top"><h2>Log Payment</h2><button class="modal-close" onclick="document.getElementById('logPaymentOverlay').remove()">✕</button></div><div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Payment for <strong style="color:var(--text)">${card.name} ••••${card.last4}</strong></div><div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="paymentAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div><div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="paymentDate" value="${new Date().toISOString().split('T')[0]}"></div><button class="submit-btn green" onclick="savePayment('${cardId}','manual')">Save Payment</button></div>`;
+  overlay.innerHTML=`<div class="modal" style="padding-bottom:calc(20px + 80px + var(--safe-bottom))"><div class="modal-top"><h2>Log Payment</h2><button class="modal-close" onclick="document.getElementById('logPaymentOverlay').remove()">✕</button></div><div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Payment for <strong style="color:var(--text)">${card.name} ••••${card.last4}</strong></div><div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="paymentAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div><div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="paymentDate" value="${ptDateStr()}"></div><button class="submit-btn green" onclick="savePayment('${cardId}','manual')">Save Payment</button></div>`;
   document.body.appendChild(overlay);
 }
 function savePayment(cardId,source,amount=null,date=null){
@@ -7020,7 +7097,7 @@ function openIncomeModal(){
   document.getElementById('addIncomeModal').classList.add('open');
   document.getElementById('incomeAmount').value='';
   document.getElementById('incomeNote').value='';
-  document.getElementById('incomeDate').value=new Date().toISOString().split('T')[0];
+  document.getElementById('incomeDate').value=ptDateStr();
   document.getElementById('incomeFrequency').value='monthly';
   onFrequencyChange();
 }
@@ -7352,7 +7429,7 @@ function saveGoal(){
   if(!name||!target||target<=0){alert('Please enter name and target');return;}
   const colors=['#6c5ce7','#00d2a0','#4dabf7','#ffd43b','#ff6b6b','#e64980','#ff922b','#51cf66'];
   if(editId){const g=savingsGoals.find(g=>g.id===editId);if(g){g.name=name;g.target=target;g.savedSoFar=savedSoFar;g.deadline=deadline;g.icon=selectedGoalIcon;}}
-  else savingsGoals.push({id:crypto.randomUUID(),name,target,savedSoFar,deadline,icon:selectedGoalIcon,color:colors[savingsGoals.length%colors.length],createdAt:new Date().toISOString().split('T')[0]});
+  else savingsGoals.push({id:crypto.randomUUID(),name,target,savedSoFar,deadline,icon:selectedGoalIcon,color:colors[savingsGoals.length%colors.length],createdAt:ptDateStr()});
   saveToStorage();closeModal('addGoalModal');renderGoals();showSyncBar('success','🎯',`Goal <strong>${name}</strong> saved`);
 }
 function addToGoal(goalId){
@@ -7403,7 +7480,7 @@ function saveCardBalance(){
   const balance=parseFloat(document.getElementById('balanceAmount').value)||0;
   const apr=parseFloat(document.getElementById('balanceAPR').value)||0;
   const minPay=parseFloat(document.getElementById('balanceMinPay').value)||0;
-  cardBalances[cardId]={statementBalance:balance,apr,minPay,lastUpdated:new Date().toISOString().split('T')[0]};
+  cardBalances[cardId]={statementBalance:balance,apr,minPay,lastUpdated:ptDateStr()};
   saveToStorage();closeModal('logBalanceModal');renderDebtPlanner();showSyncBar('success','💳','Balance updated');
 }
 function setDebtStrategy(s){debtStrategy=s;document.querySelectorAll('.strategy-btn').forEach(b=>b.classList.remove('active'));document.getElementById('strategy-'+s)?.classList.add('active');saveToStorage();renderDebtProjection();}
@@ -7616,7 +7693,7 @@ function openAddPaymentModal(cardId) {
   sel.innerHTML = CARDS.filter(c=>(c.type||'credit')==='credit')
     .map(c=>`<option value="${c.id}" ${c.id===cardId?'selected':''}>${c.name} •••• ${c.last4}</option>`).join('');
   document.getElementById('paymentAmountInput').value = '';
-  document.getElementById('paymentDateInput').value = new Date().toISOString().split('T')[0];
+  document.getElementById('paymentDateInput').value = ptDateStr();
   document.getElementById('paymentNoteInput').value = '';
 }
 
@@ -7891,7 +7968,7 @@ function sageStopMic() {
 
 // ─── Q&A: gather context + stream response ─────────────────
 function sageBuildContext() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ptDateStr();
   const monthStart = today.slice(0, 7) + '-01';
   const monthTx = transactions.filter(t => t.date >= monthStart);
   const lastMonthSpend = transactions
@@ -8081,7 +8158,7 @@ async function sageAddTransactionFromText(text) {
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ptDateStr();
   const cardList = CARDS.map(c => `- ${c.id}: "${c.name}" (last 4: ${c.last4})`).join('\n');
   const system = SAGE_ADD_SYSTEM.replace('{{CARDS}}', cardList).replace('{{TODAY}}', today);
 
@@ -8207,7 +8284,7 @@ async function sageDeleteFromText(text) {
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ptDateStr();
   try {
     const resp = await askSage({
       model: 'claude-haiku-4-5',
@@ -8325,7 +8402,7 @@ async function sagePayFromText(text) {
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ptDateStr();
   const cardList = CARDS.map(c => `- ${c.id}: "${c.name}" (last 4: ${c.last4})`).join('\n');
   const system = SAGE_PAY_SYSTEM.replace('{{TODAY}}', today).replace('{{CARDS}}', cardList);
   try {
@@ -8523,9 +8600,8 @@ const SAGE_BUDGET_SCHEMA = {
 
 async function sageBuildBudget() {
   if (sageBusy) return;
-  // Aggregate last 90 days of spend by category.
-  const now = new Date();
-  const cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 90).toISOString().slice(0, 10);
+  // Aggregate last 90 days of spend by category (Pacific calendar).
+  const cutoff = ptDateOffset(-90);
   const recent = transactions.filter(t => t.date >= cutoff);
   if (recent.length < 5) {
     sageAppendMsg('assistant', "I don't have enough spending history yet — sync at least a few weeks of transactions and try again.");
