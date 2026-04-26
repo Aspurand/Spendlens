@@ -7724,9 +7724,18 @@ async function askSage({ model = 'claude-haiku-4-5', system, messages, max_token
 }
 
 // ─── UI: open / close ───────────────────────────────────────
+function sageShowSuggestions() {
+  const el = document.getElementById('sageSuggestions');
+  if (el) el.style.display = '';
+}
+function sageHideSuggestions() {
+  const el = document.getElementById('sageSuggestions');
+  if (el) el.style.display = 'none';
+}
 function openSage() {
   document.getElementById('sageModal').classList.add('open');
-  if (sageHistory.length === 0) sageGreet();
+  if (sageHistory.length === 0) { sageGreet(); sageShowSuggestions(); }
+  else sageHideSuggestions();
   setTimeout(() => document.getElementById('sageInput')?.focus(), 250);
 }
 function closeSage() {
@@ -7758,6 +7767,8 @@ function sageAppendMsg(role, text) {
   div.textContent = text;
   thread.appendChild(div);
   thread.scrollTop = thread.scrollHeight;
+  // Once the user has actually said something, the chips become noise.
+  if (role === 'user') sageHideSuggestions();
   return div;
 }
 function sageAppendTyping() {
