@@ -2059,10 +2059,12 @@ select.form-input {
 .sp-section:first-of-type { display: none; }
 
 /* ════════════════════════════════════════════════
-   FAB: sit above the tab bar, not hidden behind it
+   FAB: hidden — Add Transaction now lives inside Sage
+   (kept in DOM so openAddModal() still works for the
+   form-based / SMS-paste flow triggered from a Sage chip)
    ════════════════════════════════════════════════ */
 .fab {
-  bottom: calc(80px + var(--safe-bottom)) !important;
+  display: none !important;
 }
 
 /* ════════════════════════════════════════════════
@@ -4200,6 +4202,8 @@ select.form-input {
     </div>
     <div class="sage-thread" id="sageThread"></div>
     <div class="sage-suggestions" id="sageSuggestions">
+      <button class="sage-chip" onclick="sageHintAdd()">+ Add transaction</button>
+      <button class="sage-chip" onclick="openAddModal();closeSage()">+ Add via form / paste SMS</button>
       <button class="sage-chip" onclick="sageQuickAsk('Can I afford $40 for dinner tonight?')">Can I afford $40 for dinner?</button>
       <button class="sage-chip" onclick="sageQuickAsk('Where am I overspending this month?')">Where am I overspending?</button>
       <button class="sage-chip" onclick="sageQuickAsk('Where can I save more money?')">Where can I save more?</button>
@@ -7848,6 +7852,12 @@ Never invent numbers. Never recommend specific financial products.`;
 
 async function sageChat(userMessage) {
   if (sageBusy) return;
+  // Route "I spent $X at Y"-style messages to the add-transaction flow
+  // before paying for a Sonnet 4.6 turn.
+  if (sageLooksLikeAdd(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageAddTransactionFromText(userMessage);
+  }
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendMsg('user', userMessage);
@@ -7893,6 +7903,175 @@ function sageSubmit() {
   if (!text || sageBusy) return;
   input.value = ''; sageAutoResize(input);
   sageChat(text);
+}
+
+// ─── Natural-language "Add transaction" via Sage ─────────────
+// User types or speaks: "I spent $25 at Starbucks for coffee yesterday"
+// Sage extracts amount/merchant/card/category/date with structured output,
+// shows a preview card, and only saves on explicit confirm.
+
+const SAGE_ADD_INTENT_RE = /\b(spent|paid|bought|charged|just\s+got|i\s+got|grabbed|picked\s+up|add(ed)?(\s+a)?\s+(\$|tx|charge|expense|payment)|log(ged)?(\s+a)?)\b/i;
+function sageLooksLikeAdd(text) {
+  // Has a $ amount or "X dollars" AND a verb suggesting a purchase
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  return hasAmount && SAGE_ADD_INTENT_RE.test(text);
+}
+
+function sageHintAdd() {
+  const input = document.getElementById('sageInput');
+  input.placeholder = 'e.g. "I spent $25 at Starbucks for coffee" — or tap the mic';
+  input.focus();
+  // Auto-start the mic so the user can dictate immediately
+  if (window.SpeechRecognition || window.webkitSpeechRecognition) sageToggleMic();
+}
+
+const SAGE_ADD_SYSTEM = `You parse a single personal-finance transaction from a user's natural-language description (text or voice transcript). Extract amount, merchant, card, category, and date.
+
+Cards available (use card_id values exactly):
+{{CARDS}}
+
+Categories (use exactly):
+- dining (restaurants, cafes, bars)
+- delivery (DoorDash, UberEats, Grubhub, etc.)
+- groceries (supermarkets)
+- transport (Uber, Lyft, taxi, transit, parking)
+- travel (flights, hotels, Airbnb)
+- shopping (Amazon, retail, clothing, electronics)
+- gas (fuel stations)
+- bills (utilities, internet, phone, insurance, rent)
+- fitness (gyms, pharmacies, doctors)
+- entertainment (streaming, movies, concerts)
+- other
+
+Date rules:
+- Today is {{TODAY}}.
+- "today" / no date mentioned → {{TODAY}}
+- "yesterday" → previous calendar day
+- Specific dates / "last Friday" → resolve to YYYY-MM-DD against today
+
+Card rules:
+- If the user names a card explicitly, match the closest card_id from the list.
+- Otherwise return card_id "unknown" — never guess.
+
+Return JSON only. The merchant should be cleaned to a short brand name (e.g. "Starbucks", not "starbucks coffee shop downtown").`;
+
+function sageAddSchema() {
+  const cardIds = [...CARDS.map(c => c.id), 'unknown'];
+  return {
+    type: 'object',
+    properties: {
+      amount: { type: 'number' },
+      merchant: { type: 'string' },
+      card_id: { type: 'string', enum: cardIds },
+      category: { type: 'string', enum: SAGE_CATEGORY_IDS },
+      date: { type: 'string' },
+    },
+    required: ['amount', 'merchant', 'card_id', 'category', 'date'],
+    additionalProperties: false,
+  };
+}
+
+async function sageAddTransactionFromText(text) {
+  if (sageBusy) return;
+  if (CARDS.length === 0) {
+    sageAppendMsg('error', '⚠️ Add a card in Settings first — every transaction needs one.');
+    return;
+  }
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const today = new Date().toISOString().slice(0, 10);
+  const cardList = CARDS.map(c => `- ${c.id}: "${c.name}" (last 4: ${c.last4})`).join('\n');
+  const system = SAGE_ADD_SYSTEM.replace('{{CARDS}}', cardList).replace('{{TODAY}}', today);
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 512,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageAddSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderAddPreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as a transaction: ' + (e.message || 'unknown error'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderAddPreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  const cat = CATEGORIES.find(c => c.id === p.category) || CATEGORIES.find(c => c.id === 'other');
+  let cardObj = CARDS.find(c => c.id === p.card_id);
+  const needsCard = !cardObj;
+  if (needsCard && CARDS.length === 1) cardObj = CARDS[0]; // single-card auto-pick
+  const cardOptions = CARDS.map(c =>
+    `<option value="${c.id}"${cardObj && c.id === cardObj.id ? ' selected' : ''}>${c.name} (${c.last4})</option>`
+  ).join('');
+  card.innerHTML = `
+    <h4>New transaction — confirm?</h4>
+    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Merchant</span><span>${escapeHtml(p.merchant)}</span></div>
+    <div class="sage-budget-row"><span>Category</span><span>${cat.icon} ${cat.name}</span></div>
+    <div class="sage-budget-row"><span>Date</span><span>${p.date}</span></div>
+    <div class="sage-budget-row"><span>Card</span>
+      <span>
+        ${CARDS.length > 1
+          ? `<select id="sageAddCardPick" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px;font:inherit;font-size:12px">${cardOptions}</select>`
+          : (cardObj ? `${cardObj.name} (${cardObj.last4})` : '⚠️ pick a card')}
+      </span>
+    </div>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    const finalCardId = (document.getElementById('sageAddCardPick')?.value) || cardObj?.id;
+    if (!finalCardId) { sageAppendMsg('error', '⚠️ Pick a card first.'); return; }
+    sageCommitTransaction({ ...p, card_id: finalCardId });
+    card.remove();
+  };
+  thread.scrollTop = 9e9;
+}
+
+function sageCommitTransaction(p) {
+  const tx = {
+    id: crypto.randomUUID(),
+    amount: +p.amount,
+    merchant: p.merchant,
+    card: p.card_id,
+    category: SAGE_CATEGORY_IDS.includes(p.category) ? p.category : 'other',
+    date: p.date,
+    time: new Date().toTimeString().slice(0, 5),
+    source: 'sage',
+  };
+  transactions.push(tx);
+  // Learn the merchant rule so the regex catches it next time
+  const key = (tx.merchant || '').toLowerCase().slice(0, 40);
+  if (key) merchantRules[key] = tx.category;
+  saveToStorage();
+  if (supabaseClient && currentUserId) scheduleFlush?.();
+  // Jump the dashboard to the transaction's month so it's visible
+  const parts = tx.date.split('-');
+  if (parts.length === 3) { currentYear = +parts[0]; currentMonth = +parts[1] - 1; updateMonthLabel?.(); }
+  renderAll();
+  sageAppendMsg('assistant', `✓ Saved: $${tx.amount.toFixed(2)} at ${tx.merchant} on ${tx.date}.`);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ─── Auto-categorization ────────────────────────────────────
