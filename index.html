@@ -3264,7 +3264,199 @@ select.form-input {
   margin-top: 3px;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   SAGE — AI assistant floating button + chat modal
+   ═══════════════════════════════════════════════════════════════ */
+.sage-fab {
+  position: fixed;
+  bottom: calc(84px + var(--safe-bottom));
+  right: 16px;
+  z-index: 1000;
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 18px 12px 14px;
+  background: linear-gradient(135deg, var(--accent) 0%, #8B3D1F 100%);
+  color: #fff;
+  border: none; border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(184,83,43,0.35), 0 2px 6px rgba(0,0,0,0.15);
+  font-family: var(--font-serif), serif;
+  font-size: 15px; font-weight: 600; letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.sage-fab:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(184,83,43,0.45); }
+.sage-fab:active { transform: translateY(0); }
+.sage-fab .sage-spark { font-size: 16px; line-height: 1; }
+@media (max-width: 480px) {
+  .sage-fab { padding: 11px 16px 11px 12px; font-size: 14px; }
+}
 
+.sage-modal {
+  position: fixed; inset: 0; z-index: 1001;
+  background: rgba(28,27,24,0.55);
+  display: none; align-items: flex-end; justify-content: center;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.sage-modal.open { display: flex; }
+.sage-sheet {
+  width: 100%; max-width: 420px;
+  height: min(92vh, 720px);
+  background: var(--bg);
+  border-radius: 24px 24px 0 0;
+  display: flex; flex-direction: column;
+  box-shadow: 0 -10px 40px rgba(0,0,0,0.25);
+  animation: sageSlideUp 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  padding-bottom: var(--safe-bottom);
+  overflow: hidden;
+}
+@keyframes sageSlideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+.sage-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sage-title {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-serif), serif;
+  font-size: 22px; font-weight: 600; color: var(--text);
+}
+.sage-title .sage-orb {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #F5D6C2, var(--accent) 60%, var(--accent-ink));
+  box-shadow: 0 0 12px rgba(184,83,43,0.4);
+}
+.sage-close {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--bg-card);
+  color: var(--text-dim); font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.sage-thread {
+  flex: 1; overflow-y: auto;
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  -webkit-overflow-scrolling: touch;
+}
+.sage-msg {
+  max-width: 86%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 14px; line-height: 1.5;
+  word-wrap: break-word; white-space: pre-wrap;
+}
+.sage-msg.user {
+  align-self: flex-end;
+  background: var(--accent); color: #fff;
+  border-bottom-right-radius: 6px;
+}
+.sage-msg.assistant {
+  align-self: flex-start;
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 6px;
+  font-family: var(--font-serif), serif;
+}
+.sage-msg.assistant strong { font-weight: 600; }
+.sage-msg.error {
+  align-self: center; background: var(--red-soft); color: var(--red);
+  border-radius: 10px; font-size: 13px; max-width: 95%;
+}
+.sage-typing {
+  align-self: flex-start;
+  display: flex; gap: 4px; padding: 10px 14px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 16px; border-bottom-left-radius: 6px;
+}
+.sage-typing span {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-muted);
+  animation: sageBounce 1.4s infinite ease-in-out;
+}
+.sage-typing span:nth-child(2) { animation-delay: 0.16s; }
+.sage-typing span:nth-child(3) { animation-delay: 0.32s; }
+@keyframes sageBounce {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+.sage-suggestions {
+  padding: 0 16px 12px;
+  display: flex; flex-wrap: wrap; gap: 6px;
+  flex-shrink: 0;
+}
+.sage-chip {
+  padding: 6px 12px; font-size: 12px;
+  background: var(--bg-card); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 999px;
+  cursor: pointer; white-space: nowrap;
+  font-family: var(--font-serif), serif;
+}
+.sage-chip:hover { background: var(--bg-card-hover); color: var(--text); }
+
+.sage-input-row {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.sage-input {
+  flex: 1;
+  min-height: 40px; max-height: 120px;
+  padding: 10px 14px;
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 20px;
+  font: inherit; font-size: 14px;
+  resize: none; outline: none;
+  font-family: var(--font-serif), serif;
+}
+.sage-input:focus { border-color: var(--accent); }
+.sage-mic, .sage-send {
+  width: 40px; height: 40px; border-radius: 50%;
+  border: none; cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.sage-mic { background: var(--bg-card); color: var(--text-dim); border: 1px solid var(--border); }
+.sage-mic.listening {
+  background: var(--red); color: #fff; border-color: var(--red);
+  animation: sagePulse 1.2s infinite;
+}
+@keyframes sagePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(184,50,50,0.5); }
+  50% { box-shadow: 0 0 0 10px rgba(184,50,50,0); }
+}
+.sage-send { background: var(--accent); color: #fff; }
+.sage-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.sage-budget-preview {
+  margin: 0 16px 12px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.sage-budget-preview h4 {
+  font-family: var(--font-serif), serif; font-size: 16px; margin: 0 0 8px;
+  color: var(--text);
+}
+.sage-budget-row {
+  display: flex; justify-content: space-between;
+  padding: 4px 0; font-size: 13px;
+  border-top: 1px solid var(--border);
+}
+.sage-budget-row:first-of-type { border-top: none; }
+.sage-budget-row span:first-child { color: var(--text-dim); }
+.sage-budget-row span:last-child { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.sage-budget-actions { display: flex; gap: 8px; margin-top: 10px; }
+.sage-budget-actions button {
+  flex: 1; padding: 8px; border-radius: 8px; border: none;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  font-family: var(--font-serif), serif;
+}
+.sage-budget-apply { background: var(--green); color: #fff; }
+.sage-budget-cancel { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border) !important; }
 
 </style>
 </head>
@@ -3994,6 +4186,34 @@ select.form-input {
 </div><!-- end iphone-frame -->
 </div><!-- end iphone-frame-host -->
 
+<!-- ═══ SAGE — AI assistant ════════════════════════════════ -->
+<button class="sage-fab" id="sageFab" onclick="openSage()" aria-label="Ask Sage">
+  <span class="sage-spark">✦</span>
+  <span>Ask Sage</span>
+</button>
+
+<div class="sage-modal" id="sageModal" onclick="if(event.target===this)closeSage()">
+  <div class="sage-sheet" role="dialog" aria-label="Sage">
+    <div class="sage-header">
+      <div class="sage-title"><div class="sage-orb"></div>Sage</div>
+      <button class="sage-close" onclick="closeSage()" aria-label="Close">✕</button>
+    </div>
+    <div class="sage-thread" id="sageThread"></div>
+    <div class="sage-suggestions" id="sageSuggestions">
+      <button class="sage-chip" onclick="sageQuickAsk('Can I afford $40 for dinner tonight?')">Can I afford $40 for dinner?</button>
+      <button class="sage-chip" onclick="sageQuickAsk('Where am I overspending this month?')">Where am I overspending?</button>
+      <button class="sage-chip" onclick="sageQuickAsk('Where can I save more money?')">Where can I save more?</button>
+      <button class="sage-chip" onclick="sageBuildBudget()">Build me a budget</button>
+      <button class="sage-chip" onclick="sageRecategorize()">Re-categorize transactions</button>
+    </div>
+    <div class="sage-input-row">
+      <textarea class="sage-input" id="sageInput" rows="1" placeholder="Ask Sage anything…" onkeydown="sageInputKey(event)" oninput="sageAutoResize(this)"></textarea>
+      <button class="sage-mic" id="sageMic" onclick="sageToggleMic()" aria-label="Voice input">🎙️</button>
+      <button class="sage-send" id="sageSend" onclick="sageSubmit()" aria-label="Send">➤</button>
+    </div>
+  </div>
+</div>
+
 <!-- ═══ TWEAKS PANEL ════════════════════════════════ -->
 <div id="tweaksPanel" style="display:none; position:fixed; bottom:20px; right:20px; z-index:9999; background:#1D1A15; color:#F2EDE2; border:1px solid #302A22; border-radius:12px; padding:16px; width:260px; font-family:'Inter',sans-serif; font-size:13px; box-shadow:0 20px 50px rgba(0,0,0,0.4);">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -4451,6 +4671,62 @@ function loadCachedProviderToken() {
   const exp = parseInt(localStorage.getItem('spendlens_token_expiry') || '0');
   return (tok && exp > Date.now()) ? tok : null;
 }
+
+// Silent Gmail token refresh via Google Identity Services. Supabase keeps us
+// signed in for weeks, but Google access tokens die after ~1h and Supabase
+// doesn't refresh provider tokens. GIS's token client can re-issue one with
+// no UI when the user's Google session is still alive.
+let gisTokenClient = null;
+let pendingSilentReAuth = null;
+function ensureGisTokenClient() {
+  if (gisTokenClient) return gisTokenClient;
+  if (!window.google?.accounts?.oauth2) return null;
+  gisTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: GMAIL_SCOPES,
+    callback: (resp) => {
+      const ok = !!resp?.access_token;
+      if (ok) {
+        gmailAccessToken = resp.access_token;
+        const expiresAt = Date.now() + ((resp.expires_in || 3600) * 1000);
+        localStorage.setItem('spendlens_provider_token', resp.access_token);
+        localStorage.setItem('spendlens_token_expiry', String(expiresAt));
+        updateGmailUI();
+      }
+      if (pendingSilentReAuth) { const r = pendingSilentReAuth; pendingSilentReAuth = null; r(ok); }
+    },
+    error_callback: (err) => {
+      console.warn('[gis] silent re-auth error:', err);
+      if (pendingSilentReAuth) { const r = pendingSilentReAuth; pendingSilentReAuth = null; r(false); }
+    },
+  });
+  return gisTokenClient;
+}
+function trySilentReAuth() {
+  return new Promise((resolve) => {
+    const client = ensureGisTokenClient();
+    if (!client || !gmailUser?.email) { resolve(false); return; }
+    if (pendingSilentReAuth) {
+      // Coalesce concurrent callers onto the in-flight request
+      const prev = pendingSilentReAuth;
+      pendingSilentReAuth = (ok) => { prev(ok); resolve(ok); };
+      return;
+    }
+    pendingSilentReAuth = resolve;
+    try {
+      // prompt:'' = no UI if Google still has a session; hint pins the account
+      client.requestAccessToken({ prompt: '', hint: gmailUser.email });
+    } catch (e) {
+      console.warn('[gis] requestAccessToken threw:', e);
+      pendingSilentReAuth = null;
+      resolve(false);
+      return;
+    }
+    setTimeout(() => {
+      if (pendingSilentReAuth) { const r = pendingSilentReAuth; pendingSilentReAuth = null; r(false); }
+    }, 10000);
+  });
+}
 function hasLocalData() {
   return transactions.length > 0 || CARDS.length > 0 || subscriptions.length > 0
       || Object.keys(budgets).length > 0 || incomeEntries.length > 0
@@ -4551,9 +4827,18 @@ async function onSupabaseSignIn(session) {
     }
   }
 
-  // Auto-sync Gmail on load if we have a valid token
+  // Auto-sync Gmail on load. If the cached Google token expired (typical
+  // after >1h away), silently refresh via GIS first — Supabase doesn't
+  // refresh provider tokens for us.
   if (gmailAccessToken) {
     setTimeout(() => { try { syncGmail(true); } catch (e) { console.error(e); } }, 1500);
+  } else if (gmailUser?.email) {
+    setTimeout(async () => {
+      try {
+        const ok = await trySilentReAuth();
+        if (ok) syncGmail(true);
+      } catch (e) { console.error(e); }
+    }, 1500);
   }
   if (nightlySyncEnabled) startNightlySyncTimer();
   } finally {
@@ -4592,10 +4877,18 @@ async function signOutGoogle() {
   showSyncBar('success', '👋', 'Signed out');
 }
 
-function handleGmailSync() {
-  if (!gmailUser) signInWithGoogle();
-  else if (!gmailAccessToken) signInWithGoogle(); // token expired → re-auth
-  else syncGmail(false);
+async function handleGmailSync() {
+  if (!gmailUser) { signInWithGoogle(); return; }
+  if (!gmailAccessToken) {
+    // Token expired — try silent refresh first; only fall through to a full
+    // OAuth redirect if Google's own session is also gone.
+    updateSyncButton('syncing');
+    const ok = await trySilentReAuth();
+    if (ok) { syncGmail(false); return; }
+    signInWithGoogle();
+    return;
+  }
+  syncGmail(false);
 }
 
 // ─── Cloud load ──────────────────────────────────────────────
@@ -5112,6 +5405,7 @@ async function syncGmail(silent = false) {
 
   let totalNew = 0;
   let errors = [];
+  const newlyAddedTxIds = [];  // track for Sage auto-categorization
 
   // Build queries from active cards' issuers
   const activeIssuers = [...new Set(CARDS.map(c => c.issuer).filter(i => ISSUER_EMAIL_QUERIES[i]))];
@@ -5129,6 +5423,7 @@ async function syncGmail(silent = false) {
         const tx = parseEmailToTransaction(msg, issuer, issuerCards);
         if (tx) {
           transactions.push(tx);
+          newlyAddedTxIds.push(tx.id);
           totalNew++;
         }
         processedEmailIds.add(msgId);
@@ -5136,6 +5431,14 @@ async function syncGmail(silent = false) {
     } catch(e) {
       if (e.status === 401) {
         gmailAccessToken = null;
+        // Try a silent refresh once; if it works, restart the sync transparently
+        const ok = await trySilentReAuth();
+        if (ok) {
+          updateGmailUI();
+          if (!silent) showSyncBar('syncing', '🔁', 'Refreshing token…');
+          setTimeout(() => syncGmail(silent), 100);
+          return;
+        }
         updateGmailUI();
         showSyncBar('error', '🔐', 'Session expired. Tap Sync to re-authenticate.');
         return;
@@ -5193,6 +5496,11 @@ async function syncGmail(silent = false) {
     } else {
       showSyncBar('success', '✓', 'Already up to date — no new transactions found');
     }
+  }
+
+  // Sage auto-categorizes anything the regex couldn't classify (fire-and-forget)
+  if (newlyAddedTxIds.length > 0) {
+    sageAutoCategorizeOnSync?.(newlyAddedTxIds).catch(e => console.warn('[sage] auto-cat failed', e));
   }
 }
 
@@ -7339,6 +7647,469 @@ function deletePayment(cardId, pDate, pAmount) {
     renderPaymentsPage();
     showSyncBar('success', '🗑️', 'Payment removed');
   }
+}
+
+// ============================================================
+// SAGE — AI assistant (Anthropic via Supabase Edge Function proxy)
+// ============================================================
+
+const SAGE_FUNCTION_URL = SUPABASE_URL + '/functions/v1/sage';
+const SAGE_CATEGORY_IDS = CATEGORIES.map(c => c.id);
+let sageHistory = []; // in-memory only — chat resets each session
+let sageBusy = false;
+let sageRecognition = null;
+let sageRecognitionActive = false;
+
+// ─── Generic proxy call ─────────────────────────────────────
+// onDelta(text) is invoked for each streamed chunk when stream:true.
+// Returns the final response object (non-stream) or full concatenated text (stream).
+async function askSage({ model = 'claude-haiku-4-5', system, messages, max_tokens = 1024,
+                        output_config, thinking, stream = false, onDelta } = {}) {
+  if (!supabaseAccessToken) throw new Error('Not signed in — open Sage requires login');
+  const body = { model, max_tokens, messages };
+  if (system) body.system = system;
+  if (output_config) body.output_config = output_config;
+  if (thinking) body.thinking = thinking;
+  if (stream) body.stream = true;
+
+  const resp = await fetch(SAGE_FUNCTION_URL, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + supabaseAccessToken,
+      'apikey': SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error('Sage error (' + resp.status + '): ' + err.slice(0, 200));
+  }
+
+  if (!stream) return await resp.json();
+
+  // Stream: parse SSE, accumulate text_delta blocks.
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '', full = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n\n')) !== -1) {
+      const chunk = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 2);
+      const line = chunk.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      const payload = line.slice(6).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const evt = JSON.parse(payload);
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+          full += evt.delta.text;
+          onDelta?.(evt.delta.text);
+        }
+      } catch (e) { /* ignore malformed events */ }
+    }
+  }
+  return full;
+}
+
+// ─── UI: open / close ───────────────────────────────────────
+function openSage() {
+  document.getElementById('sageModal').classList.add('open');
+  if (sageHistory.length === 0) sageGreet();
+  setTimeout(() => document.getElementById('sageInput')?.focus(), 250);
+}
+function closeSage() {
+  document.getElementById('sageModal').classList.remove('open');
+  if (sageRecognitionActive) sageStopMic();
+}
+function sageGreet() {
+  sageAppendMsg('assistant', "Hi — I'm Sage. Ask me about your spending, ask me to build you a budget, or tap one of the suggestions below.");
+}
+
+function sageAutoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(120, el.scrollHeight) + 'px';
+}
+function sageInputKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sageSubmit(); }
+}
+function sageQuickAsk(text) {
+  const el = document.getElementById('sageInput');
+  el.value = text; sageSubmit();
+}
+
+// ─── Thread rendering ───────────────────────────────────────
+function sageAppendMsg(role, text) {
+  const thread = document.getElementById('sageThread');
+  const div = document.createElement('div');
+  div.className = 'sage-msg ' + role;
+  div.textContent = text;
+  thread.appendChild(div);
+  thread.scrollTop = thread.scrollHeight;
+  return div;
+}
+function sageAppendTyping() {
+  const thread = document.getElementById('sageThread');
+  const div = document.createElement('div');
+  div.className = 'sage-typing';
+  div.id = 'sageTyping';
+  div.innerHTML = '<span></span><span></span><span></span>';
+  thread.appendChild(div);
+  thread.scrollTop = thread.scrollHeight;
+}
+function sageClearTyping() { document.getElementById('sageTyping')?.remove(); }
+
+// ─── Voice input (Web Speech API) ───────────────────────────
+function sageInitMic() {
+  if (sageRecognition) return sageRecognition;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { document.getElementById('sageMic').style.display = 'none'; return null; }
+  sageRecognition = new SR();
+  sageRecognition.lang = 'en-US';
+  sageRecognition.interimResults = true;
+  sageRecognition.continuous = false;
+  sageRecognition.onresult = (ev) => {
+    const transcript = Array.from(ev.results).map(r => r[0].transcript).join('');
+    const input = document.getElementById('sageInput');
+    input.value = transcript;
+    sageAutoResize(input);
+  };
+  sageRecognition.onend = () => {
+    sageRecognitionActive = false;
+    document.getElementById('sageMic').classList.remove('listening');
+  };
+  sageRecognition.onerror = (e) => {
+    console.warn('[sage mic]', e.error);
+    sageRecognitionActive = false;
+    document.getElementById('sageMic').classList.remove('listening');
+  };
+  return sageRecognition;
+}
+function sageToggleMic() {
+  const rec = sageInitMic();
+  if (!rec) return;
+  if (sageRecognitionActive) sageStopMic();
+  else {
+    try { rec.start(); sageRecognitionActive = true; document.getElementById('sageMic').classList.add('listening'); }
+    catch (e) { console.warn('[sage mic] start failed', e); }
+  }
+}
+function sageStopMic() {
+  if (sageRecognition && sageRecognitionActive) sageRecognition.stop();
+}
+
+// ─── Q&A: gather context + stream response ─────────────────
+function sageBuildContext() {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthStart = today.slice(0, 7) + '-01';
+  const monthTx = transactions.filter(t => t.date >= monthStart);
+  const lastMonthSpend = transactions
+    .filter(t => { const d = new Date(t.date); const now = new Date(); return d >= new Date(now.getFullYear(), now.getMonth() - 1, 1) && d < new Date(now.getFullYear(), now.getMonth(), 1); })
+    .reduce((s, t) => s + t.amount, 0);
+
+  const byCat = {};
+  monthTx.forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+  const monthSpend = monthTx.reduce((s, t) => s + t.amount, 0);
+
+  const recentTx = transactions.slice(-30).map(t => ({
+    date: t.date, merchant: t.merchant, amount: +t.amount.toFixed(2), category: t.category,
+  }));
+
+  const incomeMonth = (incomeEntries || []).filter(i => i.date >= monthStart).reduce((s, i) => s + (i.amount || 0), 0);
+
+  return {
+    today,
+    overall_budget: budgets.overall || null,
+    category_budgets: Object.fromEntries(Object.entries(budgets).filter(([k]) => k !== 'overall')),
+    month_spend_so_far: +monthSpend.toFixed(2),
+    last_month_total_spend: +lastMonthSpend.toFixed(2),
+    spend_by_category_this_month: Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, +v.toFixed(2)])),
+    income_this_month: +incomeMonth.toFixed(2),
+    active_cards: CARDS.length,
+    subscriptions_count: subscriptions.filter(s => s.active !== false).length,
+    recent_transactions: recentTx,
+  };
+}
+
+const SAGE_QA_SYSTEM = `You are Sage, a calm and direct personal-finance assistant inside a budgeting app called SpendLens. You answer the user's question using only the data provided in the user message. Today's date is included in the data — use it to reason about whether expenses fit the rest-of-month budget.
+
+Style:
+- Plain prose, 1-3 short paragraphs. No headers, no bullet lists unless the user explicitly asks.
+- Use $ amounts to two decimals.
+- Be specific: name merchants, categories, and dates from the data when relevant.
+- If the user asks "can I afford X", compute remaining overall budget and remaining days in the month, then give a direct yes/no with the math behind it.
+- If a question can't be answered from the data, say so briefly and suggest what to track.
+
+Never invent numbers. Never recommend specific financial products.`;
+
+async function sageChat(userMessage) {
+  if (sageBusy) return;
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendMsg('user', userMessage);
+  sageHistory.push({ role: 'user', content: userMessage });
+  sageAppendTyping();
+
+  // Build prompt: system carries persona + style; user message carries the question + JSON context.
+  const context = sageBuildContext();
+  const messages = sageHistory.slice(0, -1).concat([{
+    role: 'user',
+    content: 'Context (current state of my finances):\n```json\n' + JSON.stringify(context, null, 2) + '\n```\n\nQuestion: ' + userMessage,
+  }]);
+
+  let assistantDiv = null, full = '';
+  try {
+    full = await askSage({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      system: [{ type: 'text', text: SAGE_QA_SYSTEM, cache_control: { type: 'ephemeral' } }],
+      messages,
+      thinking: { type: 'adaptive' },
+      stream: true,
+      onDelta: (chunk) => {
+        if (!assistantDiv) { sageClearTyping(); assistantDiv = sageAppendMsg('assistant', ''); }
+        assistantDiv.textContent += chunk;
+        document.getElementById('sageThread').scrollTop = 9e9;
+      },
+    });
+    sageHistory.push({ role: 'assistant', content: full || '(no response)' });
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ ' + (e.message || 'Something went wrong'));
+    sageHistory.pop(); // drop the user message that failed
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageSubmit() {
+  const input = document.getElementById('sageInput');
+  const text = input.value.trim();
+  if (!text || sageBusy) return;
+  input.value = ''; sageAutoResize(input);
+  sageChat(text);
+}
+
+// ─── Auto-categorization ────────────────────────────────────
+const SAGE_CATEGORIZE_SYSTEM = `You categorize personal credit-card transactions for a budgeting app. Each transaction has a merchant string and an amount. Pick the single best category id for each.
+
+Available categories:
+- dining (sit-down restaurants, coffee shops, bars)
+- delivery (DoorDash, UberEats, Grubhub, food delivery)
+- groceries (supermarkets, Whole Foods, Costco for food)
+- transport (Uber, Lyft, taxi, transit, parking, tolls)
+- travel (flights, hotels, Airbnb, rental cars)
+- shopping (Amazon, retail stores, clothing, electronics)
+- gas (Shell, BP, gas stations)
+- bills (utilities, internet, phone, insurance, rent)
+- fitness (gyms, pharmacies, doctors, health-related)
+- entertainment (streaming, movies, concerts, gaming)
+- other (anything that doesn't fit above)
+
+Be decisive. Use the merchant name as primary signal. When in doubt between dining and delivery, prefer delivery only when the merchant is a delivery platform.`;
+
+const SAGE_CATEGORIZE_SCHEMA = {
+  type: 'object',
+  properties: {
+    categorized: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          category: { type: 'string', enum: SAGE_CATEGORY_IDS },
+        },
+        required: ['id', 'category'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['categorized'],
+  additionalProperties: false,
+};
+
+async function sageCategorizeTxs(txs) {
+  if (!txs.length) return { updated: 0 };
+  // Process in batches of 30 to keep prompts small.
+  let updated = 0;
+  for (let i = 0; i < txs.length; i += 30) {
+    const batch = txs.slice(i, i + 30);
+    const userMsg = 'Categorize these transactions. Return one entry per id, using exactly the id strings I gave.\n\n' +
+      JSON.stringify(batch.map(t => ({ id: t.id, merchant: t.merchant, amount: +t.amount.toFixed(2) })), null, 2);
+    try {
+      const resp = await askSage({
+        model: 'claude-haiku-4-5',
+        max_tokens: 2048,
+        system: [{ type: 'text', text: SAGE_CATEGORIZE_SYSTEM, cache_control: { type: 'ephemeral' } }],
+        messages: [{ role: 'user', content: userMsg }],
+        output_config: { format: { type: 'json_schema', schema: SAGE_CATEGORIZE_SCHEMA } },
+      });
+      const text = resp.content?.find?.(b => b.type === 'text')?.text;
+      if (!text) continue;
+      const parsed = JSON.parse(text);
+      for (const row of parsed.categorized || []) {
+        const tx = transactions.find(t => t.id === row.id);
+        if (tx && SAGE_CATEGORY_IDS.includes(row.category)) {
+          tx.category = row.category;
+          updated++;
+          // Learn the merchant rule so we don't re-ask next time.
+          const key = (tx.merchant || '').toLowerCase().slice(0, 40);
+          if (key) merchantRules[key] = row.category;
+        }
+      }
+    } catch (e) {
+      console.warn('[sage] categorize batch failed', e);
+    }
+  }
+  if (updated > 0) {
+    saveToStorage();
+    if (supabaseClient && currentUserId) scheduleFlush?.();
+    renderAll();
+  }
+  return { updated };
+}
+
+async function sageRecategorize() {
+  // Re-categorize anything currently 'other' — these are transactions the
+  // regex auto-categorizer couldn't place.
+  const candidates = transactions.filter(t => t.category === 'other').slice(-100);
+  if (!candidates.length) {
+    sageAppendMsg('assistant', "Nothing to re-categorize right now — everything's already classified.");
+    return;
+  }
+  sageAppendMsg('user', 'Re-categorize my "other" transactions');
+  sageAppendTyping();
+  try {
+    const { updated } = await sageCategorizeTxs(candidates);
+    sageClearTyping();
+    sageAppendMsg('assistant', updated > 0
+      ? `Re-categorized ${updated} of ${candidates.length} transactions.`
+      : `Looked at ${candidates.length} transactions but couldn't confidently re-categorize any.`);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ ' + e.message);
+  }
+}
+
+// Hook called from syncGmail when new transactions land — only re-categorize
+// the ones the regex fell back to 'other' on.
+async function sageAutoCategorizeOnSync(newlyAddedIds) {
+  if (!supabaseAccessToken || !newlyAddedIds?.length) return;
+  const candidates = transactions.filter(t => newlyAddedIds.includes(t.id) && t.category === 'other');
+  if (!candidates.length) return;
+  try { await sageCategorizeTxs(candidates); } catch (e) { console.warn('[sage] auto-categorize failed', e); }
+}
+
+// ─── Budget builder ─────────────────────────────────────────
+const SAGE_BUDGET_SYSTEM = `You build monthly category budgets for a personal finance app. Given the user's spending history (last 90 days, aggregated by category) and an optional overall monthly cap, produce a realistic monthly budget per category.
+
+Rules:
+- Sum of category budgets must be <= overall_cap when an overall_cap is provided.
+- Allocate based on actual spending patterns, but trim categories that are clearly over-spent and add slack to under-budgeted essentials.
+- Round each category to the nearest $5.
+- If a category had zero spend in the last 90 days, set it to 0.
+- Provide exactly one short note (1-2 sentences) explaining your allocation logic.`;
+
+const SAGE_BUDGET_SCHEMA = {
+  type: 'object',
+  properties: {
+    budgets: {
+      type: 'object',
+      properties: Object.fromEntries(SAGE_CATEGORY_IDS.map(id => [id, { type: 'number' }])),
+      required: SAGE_CATEGORY_IDS.slice(),
+      additionalProperties: false,
+    },
+    notes: { type: 'string' },
+  },
+  required: ['budgets', 'notes'],
+  additionalProperties: false,
+};
+
+async function sageBuildBudget() {
+  if (sageBusy) return;
+  // Aggregate last 90 days of spend by category.
+  const now = new Date();
+  const cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 90).toISOString().slice(0, 10);
+  const recent = transactions.filter(t => t.date >= cutoff);
+  if (recent.length < 5) {
+    sageAppendMsg('assistant', "I don't have enough spending history yet — sync at least a few weeks of transactions and try again.");
+    return;
+  }
+  const byCat = {};
+  SAGE_CATEGORY_IDS.forEach(id => byCat[id] = 0);
+  recent.forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
+
+  sageAppendMsg('user', 'Build me a monthly budget');
+  sageAppendTyping();
+
+  const overall = budgets.overall || null;
+  const userMsg =
+    'Here is my spending over the last 90 days, grouped by category (in dollars):\n' +
+    JSON.stringify(Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, +v.toFixed(2)])), null, 2) +
+    '\n\nOverall monthly cap: ' + (overall ? '$' + overall : 'not set — pick something reasonable') +
+    '\n\nReturn a per-category monthly budget for me.';
+
+  try {
+    sageBusy = true;
+    const resp = await askSage({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      system: [{ type: 'text', text: SAGE_BUDGET_SYSTEM, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: userMsg }],
+      output_config: { format: { type: 'json_schema', schema: SAGE_BUDGET_SCHEMA } },
+      thinking: { type: 'adaptive' },
+    });
+    const text = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!text) throw new Error('Empty response');
+    const parsed = JSON.parse(text);
+    sageClearTyping();
+    sageRenderBudgetPreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ ' + e.message);
+  } finally {
+    sageBusy = false;
+  }
+}
+
+function sageRenderBudgetPreview({ budgets: proposed, notes }) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  const total = Object.values(proposed).reduce((s, v) => s + v, 0);
+  const rows = SAGE_CATEGORY_IDS
+    .filter(id => proposed[id] > 0)
+    .map(id => {
+      const cat = CATEGORIES.find(c => c.id === id);
+      return `<div class="sage-budget-row"><span>${cat.icon} ${cat.name}</span><span>$${proposed[id].toLocaleString()}</span></div>`;
+    }).join('');
+  card.innerHTML = `
+    <h4>Proposed monthly budget — $${total.toLocaleString()} total</h4>
+    ${rows}
+    <div class="sage-budget-row"><span style="color:var(--accent);font-weight:600">Total</span><span>$${total.toLocaleString()}</span></div>
+    <p style="font-size:12px;color:var(--text-dim);margin:10px 0 0;font-family:var(--font-serif),serif">${notes || ''}</p>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel" onclick="this.closest('.sage-budget-preview').remove()">Discard</button>
+      <button class="sage-budget-apply" onclick='sageApplyBudget(${JSON.stringify(proposed)});this.closest(".sage-budget-preview").remove();'>Apply</button>
+    </div>`;
+  thread.appendChild(card);
+  thread.scrollTop = 9e9;
+}
+
+function sageApplyBudget(proposed) {
+  Object.entries(proposed).forEach(([k, v]) => {
+    if (v > 0) budgets[k] = v;
+    else delete budgets[k];
+  });
+  saveToStorage();
+  if (supabaseClient && currentUserId) scheduleFlush?.();
+  renderAll();
+  sageAppendMsg('assistant', 'Budget applied. You can tweak any line in Settings.');
 }
 
 // SpendLens v5.0 — Finance Edition ═════════════════════

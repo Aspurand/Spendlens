@@ -1,0 +1,14 @@
+# Supabase CLI cache
+supabase/.temp/
+supabase/.branches/
+
+# Local environment
+.env
+.env.local
+*.local
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
