@@ -5027,6 +5027,15 @@ async function onSupabaseSignIn(session) {
   // Must run AFTER loadFromCloud so we have the latest last_applied_period
   // values, otherwise we'd risk firing a movement twice in one period.
   if (typeof applyAutoSchedules === 'function') applyAutoSchedules();
+  // L4: also run every 6 hours while the PWA is open so a tab left
+  // running across midnight (1st of the month, etc.) catches the new
+  // period instead of waiting for a manual reload. Idempotent — the
+  // last_applied_period check rejects re-fires within the same period.
+  if (!window.__autoApplyInterval && typeof applyAutoSchedules === 'function') {
+    window.__autoApplyInterval = setInterval(() => {
+      try { applyAutoSchedules(); } catch (e) { console.warn('[auto-apply tick] failed', e); }
+    }, 6 * 60 * 60 * 1000);
+  }
   renderAll();
 
   // CRITICAL: flush any pending work from before sign-in (offline edits,
@@ -5401,6 +5410,7 @@ async function flushToCloud() {
   const dProc = take('processed_emails');
   const dC = take('cards');
   const dSched = take('scheduled_movements');
+  const dHist = take('sync_history');
   const deleteJobs = [];
   if (dT.length)    deleteJobs.push(sbDeleteIn('transactions', 'id', dT));
   if (dS.length)    deleteJobs.push(sbDeleteIn('subscriptions', 'id', dS));
@@ -5408,6 +5418,7 @@ async function flushToCloud() {
   if (dI.length)    deleteJobs.push(sbDeleteIn('income_entries', 'id', dI));
   if (dG.length)    deleteJobs.push(sbDeleteIn('savings_goals', 'id', dG));
   if (dSched.length)deleteJobs.push(sbDeleteIn('scheduled_movements', 'id', dSched));
+  if (dHist.length) deleteJobs.push(sbDeleteIn('sync_history', 'id', dHist));
   for (const b of dBud)  deleteJobs.push(sbDeleteEq('budgets',        { user_id: uid, key: b.key }));
   for (const b of dBal)  deleteJobs.push(sbDeleteEq('card_balances',  { user_id: uid, card_id: b.card_id }));
   for (const r of dRules)deleteJobs.push(sbDeleteEq('merchant_rules', { user_id: uid, merchant_key: r.merchant_key }));
@@ -5415,7 +5426,27 @@ async function flushToCloud() {
   if (dC.length)    deleteJobs.push(sbDeleteIn('cards', 'id', dC));
   if (deleteJobs.length) {
     console.log('[flush] running', deleteJobs.length, 'delete job(s)');
-    await Promise.all(deleteJobs);
+    try {
+      await Promise.all(deleteJobs);
+    } catch (e) {
+      // M11: a single delete rejection threw out every queued ID. Restore
+      // them so the next flush retries instead of dropping rows we
+      // successfully *intended* to delete.
+      cloudDeletes.transactions.push(...dT);
+      cloudDeletes.subscriptions.push(...dS);
+      cloudDeletes.card_payments.push(...dP);
+      cloudDeletes.income_entries.push(...dI);
+      cloudDeletes.savings_goals.push(...dG);
+      cloudDeletes.scheduled_movements.push(...dSched);
+      cloudDeletes.sync_history.push(...dHist);
+      cloudDeletes.cards.push(...dC);
+      cloudDeletes.budgets.push(...dBud);
+      cloudDeletes.card_balances.push(...dBal);
+      cloudDeletes.merchant_rules.push(...dRules);
+      cloudDeletes.processed_emails.push(...dProc);
+      persistCloudDeletes();
+      throw e;
+    }
     console.log('[flush] deletes complete');
   }
 
@@ -5538,10 +5569,11 @@ function dedupeTransactions() {
   for (const tx of transactions) {
     // Include the time so two legit charges at the same merchant for the
     // same amount on the same day (e.g., a morning + afternoon LA Metro
-    // fare) don't collapse into one. Time defaults to '12:00' for rows
-    // missing it; if both default, they DO collapse — accept that
-    // narrow false-positive over the much worse data-loss case.
-    const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || '', tx.time || ''].join('|');
+    // fare) don't collapse into one. Default to '12:00' to match the
+    // coercion in loadFromCloud — otherwise a freshly-loaded row would
+    // not match its locally-saved twin and dedupe would either over- or
+    // under-collapse depending on which side missed time.
+    const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || '', tx.time || '12:00'].join('|');
     if (seen.has(key)) {
       dupes.push(tx);
     } else {
@@ -5780,7 +5812,12 @@ async function syncGmail(silent = false) {
 
   const syncRecord = { time: new Date().toISOString(), found: totalNew, payments: totalPayments, errors: errors.length };
   syncHistory.unshift(syncRecord);
-  if (syncHistory.length > 20) syncHistory.pop();
+  // Trim to 20 rows AND queue the popped row's id for cloud-side delete
+  // — without this, sync_history grows unboundedly in Supabase.
+  if (syncHistory.length > 20) {
+    const popped = syncHistory.pop();
+    if (popped?._id) cloudDeletes.sync_history.push(popped._id);
+  }
 
   // Amex (and some other issuers) can send multiple emails for one charge
   // — e.g. "Large purchase" alert + the standard "Transaction" alert, or
@@ -6005,6 +6042,23 @@ function parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, 
   // actual charge; the real $35.96 always lives in the body.
   const amountText = stripAlertThresholds(bodyOnly);
 
+  /** Pick the first $-amount from `text` that isn't $0.00 and isn't
+   *  mentioned in a "credit limit" / "minimum due" / "available credit"
+   *  context within ±20 chars. Returns the numeric value or null. */
+  function firstNonFooterAmount(text) {
+    const re = /\$\s*([\d,]+\.\d{2})/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const v = parseFloat(m[1].replace(/,/g, ''));
+      if (!(v > 0)) continue;
+      const start = Math.max(0, m.index - 20);
+      const ctx = text.slice(start, m.index + m[0].length + 20).toLowerCase();
+      if (/credit\s+limit|available\s+credit|minimum\s+(?:due|payment)|min\.?\s*due/.test(ctx)) continue;
+      return v;
+    }
+    return null;
+  }
+
   let amount = null;
   let merchant = null;
   let cardId = issuerCards[0]?.id || issuer;
@@ -6036,8 +6090,8 @@ function parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, 
     // Amount: "in the amount of $7.20" — search body only.
     const capAmt = amountText.match(/(?:in\s+the\s+amount\s+of|amount\s+of)\s*\$\s*([\d,]+\.\d{2})/i);
     if (capAmt) amount = parseFloat(capAmt[1].replace(/,/g, ''));
-    // Fallback: any $-amount in the body (subject excluded).
-    if (!amount) { const m = amountText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
+    // Last-ditch fallback skips footer mentions (credit limit / min due).
+    if (!amount) amount = firstNonFooterAmount(amountText);
 
     // Merchant: "at RAZ*FNP E Retail Priva, a pending" — lazy match up to ", a pending/purchase"
     const capMerch = fullText.match(/\bat\s+(.+?),\s+a\s+(?:pending|purchase)/i);
@@ -6067,7 +6121,9 @@ function parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, 
       const m = amountText.match(/(?:purchase|charge|transaction)\s+(?:of|for)\s+\$\s*([\d,]+\.\d{2})/i);
       if (m) amount = parseFloat(m[1].replace(/,/g, ''));
     }
-    if (!amount) { const m = amountText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
+    // Last-ditch fallback skips footer mentions (credit limit / min due)
+    // and rejects $0.00 — see firstNonFooterAmount() above.
+    if (!amount) amount = firstNonFooterAmount(amountText);
 
     // Merchant: "Merchant detail  LYFT *TEMP AUTH HOLD in +1855..., CA, USA"
     // Use lookahead to stop at " in +digits" location suffix
@@ -6095,9 +6151,9 @@ function parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, 
       // through even if alert-threshold stripping ever fails.
       /(?:amount|charge|purchase|spent|transaction)\s+(?:of|for)\s+\$?\s*([\d,]+\.\d{2})/i,
       /(?:amount|charge|purchase|spent|transaction)[^$\d]*\$?\s*([\d,]+\.\d{2})/i,
-      /\$\s*([\d,]+\.\d{2})/,
     ];
     for (const p of amountPatterns) { const m = amountText.match(p); if(m){amount=parseFloat(m[1].replace(/,/g,''));break;} }
+    if (!amount) amount = firstNonFooterAmount(amountText);
 
     merchant = tryGenericMerchant();
 
@@ -6564,11 +6620,25 @@ function removeCard(cardId) {
   // Server-side FK cascades handle card_payments + card_balances; clean locally too.
   delete cardPayments[cardId];
   delete cardBalances[cardId];
+  // Null in-memory FK references in dependent tables. Cloud-side these
+  // FKs use ON DELETE SET NULL (cards.id is the parent), so the round-
+  // trip stays consistent. Without this the UI would still render stale
+  // refs (transactions on a deleted card, schedules pointing nowhere)
+  // until the next loadFromCloud — and any auto-apply between deletion
+  // and reload would silently no-op against a missing account.
+  for (const t of transactions) if (t.card === cardId) t.card = null;
+  for (const i of incomeEntries) if (i.destinationAccountId === cardId) i.destinationAccountId = null;
+  for (const s of scheduledMovements) {
+    if (s.sourceAccountId === cardId) s.sourceAccountId = null;
+    if (s.targetAccountId === cardId) s.targetAccountId = null;
+    if (s.cardId === cardId)          s.cardId = null;
+  }
   cloudDeletes.cards.push(cardId);
   saveToStorage();
   document.getElementById('editCardOverlay')?.remove();
   renderAll();
   renderSettingsCards();
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
 }
 
 // ============================================================
@@ -7516,10 +7586,13 @@ function getMonthIncome(year,month){
   const monthPrefix = `${year}-${String(month+1).padStart(2,'0')}`;
   return incomeEntries.filter(e=>{
     if(e.frequency==='once') return e.date && e.date.startsWith(monthPrefix);
-    if(e.frequency==='monthly') return true; // shows every month
+    // Recurring entries should only show in months on or after the
+    // entry's start date — otherwise a paycheck added today would
+    // retroactively appear in last year's income totals.
+    const startsBeforeMonth = !e.date || e.date.slice(0, 7) <= monthPrefix;
+    if(e.frequency==='monthly') return startsBeforeMonth;
     if(e.frequency==='biweekly'||e.frequency==='weekly'){
-      // Count occurrences in this month
-      return true; // simplified: always show if recurring
+      return startsBeforeMonth;
     }
     return e.date && e.date.startsWith(monthPrefix);
   }).reduce((s,e)=>{
@@ -9667,6 +9740,13 @@ function applyAutoSchedules() {
 
   if (appliedCount > 0) {
     saveToStorage();
+    // Force-flush the new lastAppliedPeriod values to cloud immediately
+    // (instead of riding the 1.5s scheduleFlush debounce). Otherwise a
+    // user who reloads within the debounce window would re-pull the old
+    // periods from cloud and applyAutoSchedules would fire again — the
+    // local-period merge in loadFromCloud helps, but only if the local
+    // copy survives. scheduleFlush(0) closes that race.
+    if (typeof scheduleFlush === 'function') scheduleFlush(0);
     showSyncBar('success', '⚙️', `Auto-applied <strong>${appliedCount}</strong> scheduled item${appliedCount === 1 ? '' : 's'}`);
   }
 }
