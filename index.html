@@ -5458,8 +5458,14 @@ function showYesterdaySummary() {
 // ============================================================
 // GMAIL SYNC ENGINE
 // ============================================================
+let syncInProgress = false;
 async function syncGmail(silent = false) {
   if (!gmailAccessToken) return;
+  // Re-entrancy guard: nightly cron + auto-on-signin + manual button + 401
+  // retry can otherwise overlap and produce duplicate transactions.
+  if (syncInProgress) return;
+  syncInProgress = true;
+  try {
   if (!silent) showSyncBar('syncing', '⏳', 'Syncing Gmail…');
   updateSyncButton('syncing');
 
@@ -5561,6 +5567,9 @@ async function syncGmail(silent = false) {
   // Sage auto-categorizes anything the regex couldn't classify (fire-and-forget)
   if (newlyAddedTxIds.length > 0) {
     sageAutoCategorizeOnSync?.(newlyAddedTxIds).catch(e => console.warn('[sage] auto-cat failed', e));
+  }
+  } finally {
+    syncInProgress = false;
   }
 }
 
@@ -5781,10 +5790,12 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
     ];
     for (const p of amountPatterns) { const m = fullText.match(p); if(m){amount=parseFloat(m[1].replace(/,/g,''));break;} }
 
+    // Label-style patterns are anchored to start-of-line so prose mentions
+    // (e.g. "Manage merchant preferences" in a footer) don't get captured.
     const merchantPatterns = [
-      /(?:Merchant\s*detail|Merchant|merchant)[:\s]+([A-Za-z0-9\s&'*.\-#\/]{3,50?})(?:\s+in\s+[+\d]|\n|\.|,|$)/i,
-      /(?:at|AT|purchase\s+at|charged\s+at|spent\s+at)\s+([A-Z][A-Za-z0-9\s&'*.\-#]{2,40?})(?:\s+on\s|\s+for\s|\s+ending|\.|,|$)/,
-      /(?:store|retailer|Description)[:\s]+([A-Za-z0-9\s&'.\-#\/]{3,40?})(?:\n|\.|$)/i,
+      /(?:^|\n)\s*(?:Merchant\s*detail|Merchant)[:\s]+([A-Za-z0-9\s&'*.\-#\/]{3,50}?)(?:\s+in\s+[+\d]|\n|\.|,|$)/im,
+      /(?:at|AT|purchase\s+at|charged\s+at|spent\s+at)\s+([A-Z][A-Za-z0-9\s&'*.\-#]{2,40}?)(?:\s+on\s|\s+for\s|\s+ending|\.|,|$)/,
+      /(?:^|\n)\s*(?:store|retailer|Description)[:\s]+([A-Za-z0-9\s&'.\-#\/]{3,40}?)(?:\n|\.|$)/im,
     ];
     for (const p of merchantPatterns) { const m = fullText.match(p); if(m){merchant=m[1].trim().replace(/\s+/g,' ');break;} }
 
