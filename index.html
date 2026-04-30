@@ -5975,6 +5975,25 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   let merchant = null;
   let cardId = issuerCards[0]?.id || issuer;
 
+  // Shared "label-style" merchant patterns — used by issuer-specific
+  // branches as a fallback so a generic "Merchant: NAME in CITY..." line
+  // gets caught even when the issuer's primary template doesn't match.
+  // Patterns 1–2 capture the rest of the line (including commas) and
+  // rely on cleanMerchant() to strip trailing " in CITY, ST, USA"
+  // location suffixes; patterns that target prose mentions are stricter.
+  const GENERIC_MERCHANT_PATTERNS = [
+    /(?:^|\n)\s*(?:Merchant\s*detail|Merchant)[:\s]+([^\n]{3,150}?)\s*(?:\n|$)/im,
+    /(?:^|\n)\s*(?:store|retailer|Description)[:\s]+([^\n]{3,150}?)\s*(?:\n|$)/im,
+    /(?:at|AT|purchase\s+at|charged\s+at|spent\s+at)\s+([A-Z][A-Za-z0-9\s&'*.\-#]{2,40}?)(?:\s+on\s|\s+for\s|\s+ending|\.|,|$)/,
+  ];
+  function tryGenericMerchant() {
+    for (const p of GENERIC_MERCHANT_PATTERNS) {
+      const m = fullText.match(p);
+      if (m) return m[1].trim().replace(/\s+/g, ' ');
+    }
+    return null;
+  }
+
   // ── CAPITAL ONE ──────────────────────────────────────
   // Format: "on March 15, 2026, at RAZ*FNP E Retail Priva, a pending authorization
   //          or purchase in the amount of $7.20 was placed or charged on your
@@ -5989,9 +6008,14 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
     // Merchant: "at RAZ*FNP E Retail Priva, a pending" — lazy match up to ", a pending/purchase"
     const capMerch = fullText.match(/\bat\s+(.+?),\s+a\s+(?:pending|purchase)/i);
     if (capMerch) merchant = capMerch[1].trim();
+    // Fallback to the shared label patterns ("Merchant: X" etc.) so the
+    // generic alert template lands here too.
+    if (!merchant) merchant = tryGenericMerchant();
 
-    // Card: "Card ending in 0444" or "Platinum Card ending in 0444"
-    const capCard = fullText.match(/(?:card|account)\s+ending\s+in\s+(\d{4})/i);
+    // Card: "Card ending in 0444", "Platinum Card ending in 0444", or
+    // "credit card ...0444" — Capital One alerts use both forms.
+    let capCard = fullText.match(/(?:card|account)\s+ending\s+in\s+(\d{4})/i);
+    if (!capCard) capCard = fullText.match(/(?:credit|debit)?\s*card\s+\.{2,3}(\d{4})/i);
     if (capCard) { const found = issuerCards.find(c => c.last4 === capCard[1]); if (found) cardId = found.id; }
   }
 
@@ -6009,11 +6033,15 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
     // Use lookahead to stop at " in +digits" location suffix
     const wfMerch = fullText.match(/Merchant\s*detail\s+(.+?)(?=\s+in\s+[+\d]|\s*\n|$)/im);
     if (wfMerch) merchant = wfMerch[1].trim();
-    else {
+    if (!merchant) {
       // fallback: "purchase at MERCHANT"
       const m = fullText.match(/(?:purchase|transaction)\s+(?:at|of)\s+([A-Za-z0-9\s&'*.\-#]{3,40})(?:\s+on|\s+for|\.|,|$)/i);
       if (m) merchant = m[1].trim();
     }
+    // Final fallback: shared label patterns — catches the generic
+    // "Merchant: NAME in CITY, ST, USA" alert layout that Wells Fargo's
+    // newer templates use without the "detail" keyword.
+    if (!merchant) merchant = tryGenericMerchant();
 
     // Card: "...9476" or "Credit card  ...9476"
     const wfCard = fullText.match(/\.{2,3}(\d{4})/);
@@ -6028,17 +6056,13 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
     ];
     for (const p of amountPatterns) { const m = fullText.match(p); if(m){amount=parseFloat(m[1].replace(/,/g,''));break;} }
 
-    // Label-style patterns are anchored to start-of-line so prose mentions
-    // (e.g. "Manage merchant preferences" in a footer) don't get captured.
-    const merchantPatterns = [
-      /(?:^|\n)\s*(?:Merchant\s*detail|Merchant)[:\s]+([A-Za-z0-9\s&'*.\-#\/]{3,50}?)(?:\s+in\s+[+\d]|\n|\.|,|$)/im,
-      /(?:at|AT|purchase\s+at|charged\s+at|spent\s+at)\s+([A-Z][A-Za-z0-9\s&'*.\-#]{2,40}?)(?:\s+on\s|\s+for\s|\s+ending|\.|,|$)/,
-      /(?:^|\n)\s*(?:store|retailer|Description)[:\s]+([A-Za-z0-9\s&'.\-#\/]{3,40}?)(?:\n|\.|$)/im,
-    ];
-    for (const p of merchantPatterns) { const m = fullText.match(p); if(m){merchant=m[1].trim().replace(/\s+/g,' ');break;} }
+    merchant = tryGenericMerchant();
 
-    // Card matching: "ending in XXXX" or "...XXXX" or "x+XXXX"
-    const last4Match = fullText.match(/(?:ending\s+in|ending|\.{2,3}|x{3,})\s*(\d{4})/i);
+    // Card matching: "ending in XXXX", "...XXXX", "credit card ...XXXX",
+    // or "x+XXXX". The first match wins.
+    let last4Match = fullText.match(/(?:ending\s+in|ending)\s*(\d{4})/i);
+    if (!last4Match) last4Match = fullText.match(/(?:credit|debit)?\s*card\s+\.{2,3}(\d{4})/i);
+    if (!last4Match) last4Match = fullText.match(/(?:\.{2,3}|x{3,})\s*(\d{4})/i);
     if (last4Match) { const found = issuerCards.find(c => c.last4 === last4Match[1]); if (found) cardId = found.id; }
   }
 
@@ -6058,9 +6082,9 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
 
 function cleanMerchant(m) {
   return m
-    .replace(/\s+in\s+[+\d][\d\s,]+.*$/i, '')    // strip " in +18552800278, CA, USA"
-    .replace(/\s+in\s+[A-Z]{2,},\s+[A-Z]{2}.*$/i, '') // strip " in CITY, CA, USA"
-    .replace(/,\s*[A-Z]{2},?\s*USA\s*$/i, '')      // strip trailing ", CA, USA"
+    .replace(/\s+in\s+[+\d][\d\s,]+.*$/i, '')                                  // " in +18552800278, CA, USA"
+    .replace(/\s+in\s+[A-Z][\w\s']+?(?:,\s*[A-Z]{2}(?:,\s*USA)?)?\s*$/i, '')   // " in LOS ANGELES[, CA[, USA]]"
+    .replace(/,\s*[A-Z]{2},?\s*USA\s*$/i, '')                                  // trailing ", CA, USA"
     .replace(/\*+/g, '')
     .replace(/\s{2,}/g, ' ')
     .replace(/[#\d]+$/, '')
