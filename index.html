@@ -4424,11 +4424,16 @@ select.form-input {
     <div class="sage-suggestions" id="sageSuggestions">
       <button class="sage-chip" onclick="sageHintAdd()">+ Add transaction</button>
       <button class="sage-chip" onclick="sageHintPay()">💳 Log card payment</button>
+      <button class="sage-chip" onclick="sageHintIncome()">💵 Log income</button>
+      <button class="sage-chip" onclick="sageHintSetBudget()">📊 Set budget</button>
+      <button class="sage-chip" onclick="sageHintSchedule()">📅 Schedule transfer / outflow</button>
+      <button class="sage-chip" onclick="sageHintSub()">🔁 Add subscription</button>
+      <button class="sage-chip" onclick="sageHintBalance()">🏦 Update balance</button>
       <button class="sage-chip" onclick="sageHintDelete()">🗑️ Delete transaction</button>
       <button class="sage-chip" onclick="openAddModal();closeSage()">+ Add via form / paste SMS</button>
       <button class="sage-chip" onclick="sageQuickAsk('Can I afford $40 for dinner tonight?')">Can I afford $40 for dinner?</button>
       <button class="sage-chip" onclick="sageQuickAsk('Where am I overspending this month?')">Where am I overspending?</button>
-      <button class="sage-chip" onclick="sageBuildBudget()">Build me a budget</button>
+      <button class="sage-chip" onclick="sageBuildBudget()">Build me a full budget</button>
       <button class="sage-chip" onclick="sageRecategorize()">Re-categorize transactions</button>
     </div>
     <div class="sage-input-row">
@@ -8592,8 +8597,10 @@ Never invent numbers. Never recommend specific financial products.`;
 async function sageChat(userMessage) {
   if (sageBusy) return;
   // Route transactional intents to fast-path Haiku flows BEFORE paying for
-  // a Sonnet 4.6 turn. Order matters: pay/delete checked before add since
-  // "I paid $200" matches both the pay regex and the (broader) add regex.
+  // a Sonnet 4.6 turn. Order matters: more-specific checks first, since
+  // "I paid $200" matches both the pay regex and the (broader) add regex,
+  // and "I subscribed to Netflix $15" should hit the subscription handler
+  // not the add-transaction one.
   if (sageLooksLikePay(userMessage)) {
     sageAppendMsg('user', userMessage);
     return sagePayFromText(userMessage);
@@ -8601,6 +8608,26 @@ async function sageChat(userMessage) {
   if (sageLooksLikeDelete(userMessage)) {
     sageAppendMsg('user', userMessage);
     return sageDeleteFromText(userMessage);
+  }
+  if (sageLooksLikeSub(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageSubFromText(userMessage);
+  }
+  if (sageLooksLikeSchedule(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageScheduleFromText(userMessage);
+  }
+  if (sageLooksLikeSetBudget(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageSetBudgetFromText(userMessage);
+  }
+  if (sageLooksLikeIncome(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageIncomeFromText(userMessage);
+  }
+  if (sageLooksLikeBalance(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageBalanceFromText(userMessage);
   }
   if (sageLooksLikeAdd(userMessage)) {
     sageAppendMsg('user', userMessage);
@@ -9257,6 +9284,684 @@ function sageApplyBudget(proposed) {
   renderAll();
   sageAppendMsg('assistant', 'Budget applied. You can tweak any line in Settings.');
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// SAGE WRITE CAPABILITIES — budgets, schedules, subscriptions, income,
+// account balance. Each follows the same pattern: a fast Haiku parse via
+// askSage with structured-output JSON, a preview card with Save/Cancel,
+// and an explicit commit that writes locally + queues a cloud flush.
+// All routes are gated through sageChat's intent router (below).
+// ════════════════════════════════════════════════════════════════════════
+
+const DOW_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// ─── 1) SET ONE BUDGET ────────────────────────────────────────────────
+const SAGE_SET_BUDGET_INTENT_RE = /\b(?:budget|limit|cap|spend\s+limit|spending\s+limit|monthly\s+(?:budget|limit|cap))\b/i;
+function sageLooksLikeSetBudget(text) {
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  return hasAmount && SAGE_SET_BUDGET_INTENT_RE.test(text);
+}
+
+const SAGE_SET_BUDGET_SYSTEM = `You parse a budget setting from natural language.
+
+Targets:
+- "overall" — overall monthly budget (all spend)
+- A category id (per-category budget): {{CATEGORIES}}
+- A card id (per-card budget): {{CARDS}}
+
+Examples:
+- "set my monthly budget to $3000" → {"target":"overall","amount":3000}
+- "budget groceries to $500/month" → {"target":"groceries","amount":500}
+- "limit dining to $200" → {"target":"dining","amount":200}
+
+If the user names a card explicitly, use that card's id. Otherwise prefer "overall" or a category. Return JSON only.`;
+
+function sageSetBudgetSchema() {
+  const targets = ['overall', ...SAGE_CATEGORY_IDS, ...CARDS.map(c => c.id)];
+  return {
+    type: 'object',
+    properties: {
+      target: { type: 'string', enum: targets },
+      amount: { type: 'number' },
+    },
+    required: ['target', 'amount'],
+    additionalProperties: false,
+  };
+}
+
+async function sageSetBudgetFromText(text) {
+  if (sageBusy) return;
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const cardList = CARDS.length
+    ? CARDS.map(c => `  - ${c.id}: "${c.name}" (•••• ${c.last4})`).join('\n')
+    : '  (none)';
+  const catList = SAGE_CATEGORY_IDS.map(id => `  - ${id}`).join('\n');
+  const system = SAGE_SET_BUDGET_SYSTEM
+    .replace('{{CARDS}}', cardList)
+    .replace('{{CATEGORIES}}', catList);
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 256,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageSetBudgetSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderSetBudgetPreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as a budget: ' + (e.message || 'unknown'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderSetBudgetPreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+
+  // Resolve the target into the existing budgets[] key convention:
+  // 'overall' | 'cat-<id>' | <card-uuid>
+  let label = 'Overall · monthly';
+  let storeKey = 'overall';
+  if (p.target === 'overall') { /* default */ }
+  else if (SAGE_CATEGORY_IDS.includes(p.target)) {
+    const cat = CATEGORIES.find(c => c.id === p.target);
+    label = `${cat?.icon || ''} ${cat?.name || p.target}`.trim();
+    storeKey = `cat-${p.target}`;
+  } else {
+    const c = CARDS.find(c => c.id === p.target);
+    if (c) { label = `💳 ${c.name} (••••${c.last4})`; storeKey = c.id; }
+  }
+
+  card.innerHTML = `
+    <h4>Set budget?</h4>
+    <div class="sage-budget-row"><span>Target</span><span>${escapeHtml(label)}</span></div>
+    <div class="sage-budget-row"><span>Limit</span><span>$${(+p.amount).toFixed(2)} / month</span></div>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    budgets[storeKey] = +p.amount;
+    saveToStorage();
+    if (typeof renderBudgets === 'function') renderBudgets();
+    if (typeof renderAll === 'function') renderAll();
+    card.remove();
+    sageAppendMsg('assistant', `✓ Budget set: ${label} = $${(+p.amount).toFixed(2)}/mo.`);
+  };
+  thread.scrollTop = 9e9;
+}
+
+// ─── 2) SCHEDULE A MOVEMENT ──────────────────────────────────────────
+const SAGE_SCHEDULE_INTENT_RE = /\b(?:schedul[ei]|recurring|every\s+(?:mon|tue|wed|thu|fri|sat|sun)|every\s+\w+day|on\s+the\s+\d+(?:st|nd|rd|th)?\b|auto[\s\-]?(?:transfer|pay|debit|deposit)|monthly\s+(?:transfer|payment|deposit)|rent\b)/i;
+function sageLooksLikeSchedule(text) {
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  return hasAmount && SAGE_SCHEDULE_INTENT_RE.test(text);
+}
+
+const SAGE_SCHEDULE_SYSTEM = `You parse a recurring scheduled cash movement from natural language.
+
+Kinds (pick exactly one):
+- "outflow" — money leaving an account (rent, tuition, utilities). source_account_id required, target unused.
+- "transfer" — moving money between two of the user's own accounts (Checking → Savings). source AND target required.
+- "card_payment" — paying down a credit card from a cash account. source_account_id + card_id required.
+- "income" — external money entering an account (paycheck, dividend). target_account_id required, source unused.
+
+Cadence (pick exactly one):
+- "monthly" with day_of_month 1–31
+- "weekly" with day_of_week 0–6 (Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6)
+
+Cash accounts (bank/debit — for source_account_id and target_account_id):
+{{CASH_ACCOUNTS}}
+
+Credit cards (for card_id when kind="card_payment"):
+{{CREDIT_CARDS}}
+
+Rules:
+- If the user wants money to apply automatically each period, set auto_apply=true. Default false (informational only).
+- "every Thursday" → frequency:"weekly", day_of_week:4
+- "on the 1st" → frequency:"monthly", day_of_month:1
+- For unused fields, use "none" (the literal string).
+- The label is a short human title (e.g. "Rent", "Move to HYS", "Sapphire pay-down").
+
+Today is {{TODAY}}. Return JSON only.`;
+
+function sageScheduleSchema() {
+  const cashIds = ['none', ...CARDS.filter(c => c.type === 'bank' || c.type === 'debit').map(c => c.id)];
+  const cardIds = ['none', ...CARDS.filter(c => (c.type || 'credit') === 'credit').map(c => c.id)];
+  return {
+    type: 'object',
+    properties: {
+      kind: { type: 'string', enum: ['outflow', 'transfer', 'card_payment', 'income'] },
+      label: { type: 'string' },
+      amount: { type: 'number' },
+      frequency: { type: 'string', enum: ['monthly', 'weekly'] },
+      day_of_month: { type: 'integer', minimum: 1, maximum: 31 },
+      day_of_week: { type: 'integer', minimum: 0, maximum: 6 },
+      source_account_id: { type: 'string', enum: cashIds },
+      target_account_id: { type: 'string', enum: cashIds },
+      card_id: { type: 'string', enum: cardIds },
+      auto_apply: { type: 'boolean' },
+    },
+    required: ['kind', 'label', 'amount', 'frequency', 'day_of_month', 'day_of_week',
+               'source_account_id', 'target_account_id', 'card_id', 'auto_apply'],
+    additionalProperties: false,
+  };
+}
+
+async function sageScheduleFromText(text) {
+  if (sageBusy) return;
+  const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+  const credits = CARDS.filter(c => (c.type || 'credit') === 'credit');
+  if (cashAccts.length === 0 && credits.length === 0) {
+    sageAppendMsg('error', '⚠️ Add at least one account or credit card first.');
+    return;
+  }
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const cashList = cashAccts.length
+    ? cashAccts.map(c => `  - ${c.id}: "${c.name}" (•••• ${c.last4}, ${c.type})`).join('\n')
+    : '  (no cash accounts)';
+  const cardList = credits.length
+    ? credits.map(c => `  - ${c.id}: "${c.name}" (•••• ${c.last4})`).join('\n')
+    : '  (no credit cards)';
+  const system = SAGE_SCHEDULE_SYSTEM
+    .replace('{{CASH_ACCOUNTS}}', cashList)
+    .replace('{{CREDIT_CARDS}}', cardList)
+    .replace('{{TODAY}}', ptDateStr());
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 512,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageScheduleSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderSchedulePreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as a schedule: ' + (e.message || 'unknown'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderSchedulePreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  const acctName = (id) => {
+    if (!id || id === 'none') return null;
+    const c = CARDS.find(x => x.id === id);
+    return c ? `${c.name} (••••${c.last4})` : null;
+  };
+  const KIND_LABEL = { outflow: '💸 Outflow', transfer: '🔁 Transfer', card_payment: '💳 Card Pay', income: '💵 Income' };
+  const cadence = p.frequency === 'weekly'
+    ? `Every ${DOW_NAMES[p.day_of_week] || 'week'}`
+    : `Day ${p.day_of_month} of each month`;
+  const flowRows = [];
+  const src = acctName(p.source_account_id);
+  const tgt = acctName(p.target_account_id);
+  const cardName = (() => {
+    if (!p.card_id || p.card_id === 'none') return null;
+    const c = CARDS.find(x => x.id === p.card_id);
+    return c ? `${c.name} (••••${c.last4})` : null;
+  })();
+  if (src) flowRows.push(`<div class="sage-budget-row"><span>From</span><span>${escapeHtml(src)}</span></div>`);
+  if (tgt) flowRows.push(`<div class="sage-budget-row"><span>To</span><span>${escapeHtml(tgt)}</span></div>`);
+  if (cardName) flowRows.push(`<div class="sage-budget-row"><span>Card</span><span>${escapeHtml(cardName)}</span></div>`);
+
+  card.innerHTML = `
+    <h4>Schedule this?</h4>
+    <div class="sage-budget-row"><span>Kind</span><span>${KIND_LABEL[p.kind] || p.kind}</span></div>
+    <div class="sage-budget-row"><span>Label</span><span>${escapeHtml(p.label)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Cadence</span><span>${cadence}</span></div>
+    ${flowRows.join('')}
+    <div class="sage-budget-row"><span>Auto-apply</span><span>${p.auto_apply ? '✅ Yes' : 'No (informational)'}</span></div>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    const nz = (s) => (s && s !== 'none') ? s : null;
+    scheduledMovements.push({
+      id: crypto.randomUUID(),
+      kind: p.kind,
+      label: p.label,
+      amount: +p.amount,
+      frequency: p.frequency,
+      dayOfMonth: p.frequency === 'monthly' ? Number(p.day_of_month) || 1 : 1,
+      dayOfWeek:  p.frequency === 'weekly'  ? Number(p.day_of_week)  : null,
+      sourceAccountId: nz(p.source_account_id),
+      targetAccountId: nz(p.target_account_id),
+      cardId: nz(p.card_id),
+      note: null,
+      active: true,
+      autoApply: !!p.auto_apply,
+      lastAppliedPeriod: null,
+    });
+    saveToStorage();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
+    if (typeof renderCashFlowCalendar === 'function') renderCashFlowCalendar();
+    if (typeof renderAll === 'function') renderAll();
+    card.remove();
+    sageAppendMsg('assistant', `✓ Scheduled: ${p.label} ($${(+p.amount).toFixed(2)}, ${cadence}).`);
+  };
+  thread.scrollTop = 9e9;
+}
+
+// ─── 3) ADD SUBSCRIPTION ─────────────────────────────────────────────
+const SAGE_SUB_INTENT_RE = /\b(?:subscrib(?:e|ed|ing|tion)|recurring\s+(?:charge|sub)|i'?m\s+paying\s+for)\b/i;
+function sageLooksLikeSub(text) {
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  return hasAmount && SAGE_SUB_INTENT_RE.test(text);
+}
+
+const SAGE_SUB_SYSTEM = `You parse a subscription from natural language.
+
+Cards available:
+{{CARDS}}
+
+Categories: dining, delivery, groceries, transport, travel, shopping, gas, bills, fitness, entertainment, other.
+
+Rules:
+- name: short brand (e.g. "Spotify", "Netflix"). Title-case.
+- cycle: "monthly" or "yearly".
+- card_id: pick the closest match from cards above. Use "unknown" if not specified.
+- debit_day: day of month (1–31) the charge typically posts. Default 1 if not stated.
+- category: pick the closest from the list above. "entertainment" for media subs, "fitness" for gym, etc.
+
+Today is {{TODAY}}. Return JSON only.`;
+
+function sageSubSchema() {
+  return {
+    type: 'object',
+    properties: {
+      name: { type: 'string' },
+      amount: { type: 'number' },
+      cycle: { type: 'string', enum: ['monthly', 'yearly'] },
+      card_id: { type: 'string', enum: [...CARDS.map(c => c.id), 'unknown'] },
+      debit_day: { type: 'integer', minimum: 1, maximum: 31 },
+      category: { type: 'string', enum: SAGE_CATEGORY_IDS },
+    },
+    required: ['name', 'amount', 'cycle', 'card_id', 'debit_day', 'category'],
+    additionalProperties: false,
+  };
+}
+
+async function sageSubFromText(text) {
+  if (sageBusy) return;
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const cardList = CARDS.length
+    ? CARDS.map(c => `  - ${c.id}: "${c.name}" (•••• ${c.last4}, ${c.type || 'credit'})`).join('\n')
+    : '  (none)';
+  const system = SAGE_SUB_SYSTEM.replace('{{CARDS}}', cardList).replace('{{TODAY}}', ptDateStr());
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 256,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageSubSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderSubPreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as a subscription: ' + (e.message || 'unknown'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderSubPreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  let cardObj = CARDS.find(c => c.id === p.card_id);
+  if (!cardObj && CARDS.length === 1) cardObj = CARDS[0];
+  const cardOptions = CARDS.map(c =>
+    `<option value="${c.id}"${cardObj && c.id === cardObj.id ? ' selected' : ''}>${c.name} (${c.last4})</option>`
+  ).join('');
+  const cat = CATEGORIES.find(c => c.id === p.category) || { icon: '·', name: p.category };
+  card.innerHTML = `
+    <h4>Add subscription?</h4>
+    <div class="sage-budget-row"><span>Service</span><span>${escapeHtml(p.name)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)} / ${p.cycle}</span></div>
+    <div class="sage-budget-row"><span>Charges day</span><span>${p.debit_day} of each month</span></div>
+    <div class="sage-budget-row"><span>Category</span><span>${cat.icon} ${cat.name}</span></div>
+    <div class="sage-budget-row"><span>Card</span>
+      <span>
+        ${CARDS.length > 1
+          ? `<select id="sageSubCardPick" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px;font:inherit;font-size:12px">${cardOptions}</select>`
+          : (cardObj ? `${cardObj.name} (${cardObj.last4})` : '⚠️ pick a card')}
+      </span>
+    </div>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    const finalCardId = (document.getElementById('sageSubCardPick')?.value) || cardObj?.id;
+    if (!finalCardId) { sageAppendMsg('error', '⚠️ Pick a card first.'); return; }
+    subscriptions.push({
+      id: crypto.randomUUID(),
+      name: p.name,
+      amount: +p.amount,
+      cardId: finalCardId,
+      cycle: p.cycle,
+      category: p.category,
+      active: true,
+      autoDetected: false,
+      debitDay: Number(p.debit_day) || 1,
+      addedMonth: new Date().getMonth(),
+    });
+    saveToStorage();
+    if (typeof renderSubscriptions === 'function') renderSubscriptions();
+    if (typeof renderAll === 'function') renderAll();
+    card.remove();
+    sageAppendMsg('assistant', `✓ Subscription added: ${p.name} ($${(+p.amount).toFixed(2)}/${p.cycle}).`);
+  };
+  thread.scrollTop = 9e9;
+}
+
+// ─── 4) LOG INCOME ────────────────────────────────────────────────────
+const SAGE_INCOME_INTENT_RE = /\b(?:got\s+paid|paycheck|salary|bonus|commission|i\s+(?:get|earn|earn\s+a)\s+\$|log\s+(?:income|\$)|deposit\s+\$|received\s+\$|freelance\s+(?:payment|income))\b/i;
+function sageLooksLikeIncome(text) {
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  return hasAmount && SAGE_INCOME_INTENT_RE.test(text);
+}
+
+const SAGE_INCOME_SYSTEM = `You parse an income entry from natural language.
+
+Sources (pick one): salary, freelance, bonus, investment, rental, other.
+
+Frequencies (pick one):
+- "once" — a single one-time payment
+- "monthly" — recurring monthly (note pay_day = day of month)
+- "biweekly" — every two weeks
+- "weekly" — once per week
+
+Cash accounts (bank/debit) for destination_account_id; use "none" if no account specified:
+{{CASH_ACCOUNTS}}
+
+Date rules:
+- Today is {{TODAY}}.
+- "today" / no date → {{TODAY}}.
+- "yesterday" → previous calendar day.
+- For recurring entries the date represents the start / first pay date.
+
+Return JSON only.`;
+
+function sageIncomeSchema() {
+  const cashIds = ['none', ...CARDS.filter(c => c.type === 'bank' || c.type === 'debit').map(c => c.id)];
+  return {
+    type: 'object',
+    properties: {
+      amount: { type: 'number' },
+      source: { type: 'string', enum: ['salary','freelance','bonus','investment','rental','other'] },
+      frequency: { type: 'string', enum: ['once','monthly','biweekly','weekly'] },
+      date: { type: 'string' },
+      destination_account_id: { type: 'string', enum: cashIds },
+      note: { type: 'string' },
+    },
+    required: ['amount','source','frequency','date','destination_account_id','note'],
+    additionalProperties: false,
+  };
+}
+
+async function sageIncomeFromText(text) {
+  if (sageBusy) return;
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+  const cashList = cashAccts.length
+    ? cashAccts.map(c => `  - ${c.id}: "${c.name}" (•••• ${c.last4}, ${c.type})`).join('\n')
+    : '  (no cash accounts — use "none")';
+  const system = SAGE_INCOME_SYSTEM.replace('{{CASH_ACCOUNTS}}', cashList).replace('{{TODAY}}', ptDateStr());
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 256,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageIncomeSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderIncomePreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as income: ' + (e.message || 'unknown'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderIncomePreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  const acct = (p.destination_account_id && p.destination_account_id !== 'none')
+    ? CARDS.find(c => c.id === p.destination_account_id)
+    : null;
+  const SOURCE_LABEL = { salary: '💼 Salary', freelance: '💻 Freelance', bonus: '🎁 Bonus', investment: '📈 Investment', rental: '🏠 Rental', other: '📦 Other' };
+  const FREQ_LABEL = { once: 'One-time', monthly: 'Monthly', biweekly: 'Bi-weekly', weekly: 'Weekly' };
+
+  card.innerHTML = `
+    <h4>Log income?</h4>
+    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Source</span><span>${SOURCE_LABEL[p.source] || p.source}</span></div>
+    <div class="sage-budget-row"><span>Frequency</span><span>${FREQ_LABEL[p.frequency] || p.frequency}</span></div>
+    <div class="sage-budget-row"><span>${p.frequency === 'once' ? 'Date' : 'Start date'}</span><span>${p.date}</span></div>
+    <div class="sage-budget-row"><span>Deposit to</span><span>${acct ? `${acct.name} (••••${acct.last4})` : '— not linked —'}</span></div>
+    ${p.note ? `<div class="sage-budget-row"><span>Note</span><span>${escapeHtml(p.note)}</span></div>` : ''}
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    const recurring = p.frequency !== 'once';
+    let payDay = 0;
+    if (p.frequency === 'monthly') {
+      try { payDay = new Date(p.date + 'T12:00:00').getDate(); } catch (e) {}
+    }
+    const destinationAccountId = (p.destination_account_id && p.destination_account_id !== 'none')
+      ? p.destination_account_id : null;
+    incomeEntries.push({
+      id: crypto.randomUUID(),
+      amount: +p.amount,
+      source: p.source,
+      date: p.date,
+      note: p.note || null,
+      frequency: p.frequency,
+      recurring,
+      payDay,
+      destinationAccountId,
+    });
+    // Same rule as the manual Income modal — credit the destination only
+    // for one-time entries; recurring entries get auto-applied per period.
+    if (destinationAccountId && p.frequency === 'once' && typeof adjustAccountBalance === 'function') {
+      adjustAccountBalance(destinationAccountId, +(+p.amount));
+    }
+    saveToStorage();
+    if (typeof renderFinanceHub === 'function') renderFinanceHub();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
+    if (typeof renderAll === 'function') renderAll();
+    card.remove();
+    sageAppendMsg('assistant', `✓ Income logged: $${(+p.amount).toFixed(2)} (${FREQ_LABEL[p.frequency] || p.frequency}).`);
+  };
+  thread.scrollTop = 9e9;
+}
+
+// ─── 5) SET ACCOUNT BALANCE ──────────────────────────────────────────
+const SAGE_BALANCE_INTENT_RE = /\b(?:balance|set\s+\w+(?:\s+\w+)?\s+(?:to|at)\s+\$|my\s+\w+(?:\s+\w+)?\s+(?:has|is|now\s+has)\s+\$|update\s+balance)\b/i;
+function sageLooksLikeBalance(text) {
+  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
+  // Only treat as balance if a cash-account name appears in the text.
+  if (!hasAmount) return false;
+  if (!SAGE_BALANCE_INTENT_RE.test(text)) return false;
+  const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+  if (cashAccts.length === 0) return false;
+  const lower = text.toLowerCase();
+  return cashAccts.some(a => lower.includes((a.name || '').toLowerCase()) ||
+                             lower.includes((a.accountSubtype || '').toLowerCase()));
+}
+
+const SAGE_BALANCE_SYSTEM = `You parse a "set account balance" instruction. The user is reporting the current dollar balance for one of their bank/debit accounts.
+
+Cash accounts (bank/debit only — never credit):
+{{CASH_ACCOUNTS}}
+
+Match the user's description to the closest account_id. If you cannot tell which account, return account_id "unknown".
+
+Return JSON only.`;
+
+function sageBalanceSchema() {
+  const cashIds = [...CARDS.filter(c => c.type === 'bank' || c.type === 'debit').map(c => c.id), 'unknown'];
+  return {
+    type: 'object',
+    properties: {
+      account_id: { type: 'string', enum: cashIds },
+      amount: { type: 'number' },
+    },
+    required: ['account_id', 'amount'],
+    additionalProperties: false,
+  };
+}
+
+async function sageBalanceFromText(text) {
+  if (sageBusy) return;
+  const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+  if (cashAccts.length === 0) {
+    sageAppendMsg('error', '⚠️ Add a bank or debit account first.');
+    return;
+  }
+  sageBusy = true;
+  document.getElementById('sageSend').disabled = true;
+  sageAppendTyping();
+
+  const list = cashAccts.map(c => `  - ${c.id}: "${c.name}" (••••${c.last4}, ${c.accountSubtype || c.type})`).join('\n');
+  const system = SAGE_BALANCE_SYSTEM.replace('{{CASH_ACCOUNTS}}', list);
+
+  try {
+    const resp = await askSage({
+      model: 'claude-haiku-4-5',
+      max_tokens: 128,
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: text }],
+      output_config: { format: { type: 'json_schema', schema: sageBalanceSchema() } },
+    });
+    const blockText = resp.content?.find?.(b => b.type === 'text')?.text;
+    if (!blockText) throw new Error('Empty parse response');
+    const parsed = JSON.parse(blockText);
+    sageClearTyping();
+    sageRenderBalancePreview(parsed);
+  } catch (e) {
+    sageClearTyping();
+    sageAppendMsg('error', '⚠️ Could not parse that as a balance update: ' + (e.message || 'unknown'));
+  } finally {
+    sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
+  }
+}
+
+function sageRenderBalancePreview(p) {
+  const thread = document.getElementById('sageThread');
+  const card = document.createElement('div');
+  card.className = 'sage-budget-preview';
+  let acct = CARDS.find(c => c.id === p.account_id);
+  // If unknown / single-account fallback, surface a picker.
+  const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+  if (!acct && cashAccts.length === 1) acct = cashAccts[0];
+  const accountOptions = cashAccts.map(c =>
+    `<option value="${c.id}"${acct && c.id === acct.id ? ' selected' : ''}>${c.name} (••••${c.last4})</option>`
+  ).join('');
+  card.innerHTML = `
+    <h4>Update balance?</h4>
+    <div class="sage-budget-row"><span>Account</span>
+      <span>
+        ${cashAccts.length > 1
+          ? `<select id="sageBalAcctPick" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px;font:inherit;font-size:12px">${accountOptions}</select>`
+          : (acct ? `${acct.name} (••••${acct.last4})` : '⚠️ no account')}
+      </span>
+    </div>
+    <div class="sage-budget-row"><span>New balance</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-actions">
+      <button class="sage-budget-cancel">Discard</button>
+      <button class="sage-budget-apply">Save</button>
+    </div>`;
+  thread.appendChild(card);
+  card.querySelector('.sage-budget-cancel').onclick = () => card.remove();
+  card.querySelector('.sage-budget-apply').onclick = () => {
+    const finalId = (document.getElementById('sageBalAcctPick')?.value) || acct?.id;
+    if (!finalId) { sageAppendMsg('error', '⚠️ Pick an account first.'); return; }
+    if (!cardBalances) cardBalances = {};
+    cardBalances[finalId] = {
+      ...(cardBalances[finalId] || { apr: 0, minPay: 0 }),
+      statementBalance: +p.amount,
+      lastUpdated: ptDateStr(),
+    };
+    saveToStorage();
+    if (typeof renderCashTile === 'function') renderCashTile();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
+    if (typeof renderAll === 'function') renderAll();
+    card.remove();
+    const a = CARDS.find(c => c.id === finalId);
+    sageAppendMsg('assistant', `✓ Balance updated: ${a?.name || 'account'} = $${(+p.amount).toFixed(2)}.`);
+  };
+  thread.scrollTop = 9e9;
+}
+
+// ─── HINT helpers (placeholder text for the chips) ────────────────────
+function sageHintSetBudget()  { const i = document.getElementById('sageInput'); i.placeholder = 'e.g. "set my groceries budget to $500/mo"'; i.focus(); }
+function sageHintSchedule()   { const i = document.getElementById('sageInput'); i.placeholder = 'e.g. "schedule rent $2000 on the 1st" or "transfer $500 to savings every Thursday"'; i.focus(); }
+function sageHintSub()        { const i = document.getElementById('sageInput'); i.placeholder = 'e.g. "I subscribed to Spotify $9.99/mo on Apple Card"'; i.focus(); }
+function sageHintIncome()     { const i = document.getElementById('sageInput'); i.placeholder = 'e.g. "got paid $500 freelance to Checking" or "I earn $1200 every Friday"'; i.focus(); }
+function sageHintBalance()    { const i = document.getElementById('sageInput'); i.placeholder = 'e.g. "Checking is $1,200" or "set savings balance to $7500"'; i.focus(); }
 
 // SpendLens v5.0 — Finance Edition ═════════════════════
 
