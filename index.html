@@ -4279,6 +4279,7 @@ select.form-input {
         <button class="card-select-btn" id="schedKindCardPayment" onclick="selectScheduleKind('card_payment')">💳 Card Pay</button>
         <button class="card-select-btn" id="schedKindIncome" onclick="selectScheduleKind('income')">💵 Income</button>
       </div>
+      <div id="schedKindHelp" style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.4"></div>
     </div>
     <div class="form-group"><label class="form-label">Label</label><input type="text" class="form-input" id="schedLabel" placeholder="e.g., Rent, Move to HYS"></div>
     <div class="form-group">
@@ -9521,12 +9522,26 @@ function countScheduleOccurrences(s, fromDate, monthsForward) {
  *  over the next `monthsForward` months. Transfers between cash accounts
  *  net to zero so we ignore them. */
 function projectScheduledCashNet(fromDate, monthsForward) {
+  // Guard: when the user already has recurring income declared via the
+  // Income modal (frequency monthly/biweekly/weekly), we skip scheduled
+  // movements with kind='income'. Otherwise a paycheck counted via
+  // getMonthIncome AND a duplicate scheduled income would double, AND a
+  // misclassified Transfer-as-Income (e.g. "$525 → Savings" picked as
+  // Income kind) would inflate the projection by its full amount.
+  // Trade-off: a user who relies *only* on scheduled income for their
+  // paycheck loses that signal in the projection — the breakdown line
+  // surfaces this so it's diagnosable.
+  const hasRecurringIncome = (incomeEntries || []).some(e =>
+    e.frequency === 'monthly' || e.frequency === 'weekly' || e.frequency === 'biweekly'
+  );
   let total = 0;
   for (const s of scheduledMovements || []) {
     if (!s.active) continue;
     const occ = countScheduleOccurrences(s, fromDate, monthsForward);
     const amt = Number(s.amount) || 0;
-    if (s.kind === 'income') total += amt * occ;
+    if (s.kind === 'income') {
+      if (!hasRecurringIncome) total += amt * occ;
+    }
     else if (s.kind === 'outflow' || s.kind === 'card_payment') total -= amt * occ;
     // 'transfer' moves cash between two accounts both already in cashOnHand,
     // so the net effect on total cash is zero — skip.
@@ -9611,6 +9626,18 @@ function renderCashTile() {
       `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% `;
     trendHTML += `<div class="cash-tile-sub" style="margin-top:2px">
       <span style="color:${color};font-weight:600">${pct}(${sign}${dollars})</span> projected · 3 mo
+    </div>`;
+    // Breakdown line — surfaces what went into the projection so a
+    // double-count (e.g. scheduled "income" that overlaps with a
+    // recurring incomeEntries paycheck) is visible at a glance.
+    const fmtAmt = (n) => '$' + Math.abs(Math.round(n)).toLocaleString('en-US');
+    const incomeStr = `+${fmtAmt(trend.forwardIncome)} in`;
+    const expenseStr = `−${fmtAmt(trend.avgMonthlyExpense * 3)} out`;
+    const schedStr = trend.scheduledNet === 0
+      ? null
+      : `${trend.scheduledNet >= 0 ? '+' : '−'}${fmtAmt(trend.scheduledNet)} sched`;
+    trendHTML += `<div class="cash-tile-sub" style="margin-top:2px;font-size:10.5px;opacity:0.8">
+      ${[incomeStr, expenseStr, schedStr].filter(Boolean).join(' · ')}
     </div>`;
   }
 
@@ -9815,6 +9842,19 @@ function selectScheduleKind(kind) {
   document.getElementById('schedSourceGroup').style.display = showSource ? '' : 'none';
   document.getElementById('schedTargetGroup').style.display = showTarget ? '' : 'none';
   document.getElementById('schedCardGroup').style.display   = showCard   ? '' : 'none';
+  // Help text — clarifies which kind to use so a "$525 to savings" doesn't
+  // accidentally get logged as Income (external money) when it's actually
+  // a Transfer (money moving between your own accounts).
+  const help = document.getElementById('schedKindHelp');
+  if (help) {
+    const HELP = {
+      outflow:      '💸 <b>Outflow</b> — money leaving an account (rent, utilities, tuition). Decreases that account\'s balance.',
+      transfer:     '🔁 <b>Transfer</b> — moving money between two of <em>your</em> accounts (Checking → Savings). Total cash on hand stays the same.',
+      card_payment: '💳 <b>Card Pay</b> — paying down a credit card from a cash account.',
+      income:       '💵 <b>Income</b> — money entering from <em>outside</em> (paycheck, dividend, gift). For moving your own money into Savings, pick Transfer instead.',
+    };
+    help.innerHTML = HELP[kind] || '';
+  }
 }
 
 function saveSchedule() {
