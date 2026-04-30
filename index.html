@@ -926,6 +926,38 @@ body {
   margin-bottom: 16px;
   display: flex; gap: 12px; align-items: flex-start;
 }
+.cash-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+.cash-tile:hover { background: var(--bg-card-hover); transform: translateY(-1px); }
+.cash-tile-icon {
+  width: 38px; height: 38px; border-radius: 10px;
+  background: var(--green-soft); color: var(--green);
+  display: grid; place-items: center;
+  font-size: 18px; flex-shrink: 0;
+}
+.cash-tile-body { flex: 1; min-width: 0; }
+.cash-tile-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.cash-tile-value {
+  font-family: var(--font-mono);
+  font-size: 22px; font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums lining-nums;
+  margin-top: 2px;
+}
+.cash-tile-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.cash-tile-arrow { color: var(--text-muted); flex-shrink: 0; }
 .gmail-cta-icon { font-size: 22px; flex-shrink: 0; }
 .gmail-cta-title {
   font-family: var(--font-serif);
@@ -3545,6 +3577,10 @@ select.form-input {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
       <span class="sp-label">Cash Flow Calendar</span>
     </div>
+    <div class="sp-item" data-page="pageAccounts" onclick="navTo('pageAccounts')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18M3 10l9-7 9 7M5 10v10M19 10v10M9 21V14h6v7"/></svg>
+      <span class="sp-label">Accounts</span>
+    </div>
     <div class="sp-item" data-page="pageGoals" onclick="navTo('pageGoals')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
       <span class="sp-label">Savings Goals</span>
@@ -3655,6 +3691,9 @@ select.form-input {
       </button>
     </div>
   </div>
+
+  <!-- ═══ CASH ON HAND tile (visible only when at least one bank/debit account exists) ═══ -->
+  <div id="cashTile" class="cash-tile" style="display:none" onclick="navTo('pageAccounts')"></div>
 
   <!-- ═══ HEADER: eyebrow date + status pill ═══ -->
   <div class="bold-head">
@@ -3926,6 +3965,18 @@ select.form-input {
         <button class="card-select-btn" id="cardTypeBank" onclick="selectCardType('bank')">🏦 Bank</button>
       </div>
     </div>
+    <div class="form-group" id="accountSubtypeGroup" style="display:none">
+      <label class="form-label">Account Type</label>
+      <div class="card-select-group">
+        <button class="card-select-btn" id="subtypeChecking" onclick="selectAccountSubtype('checking')">💵 Checking</button>
+        <button class="card-select-btn" id="subtypeSavings" onclick="selectAccountSubtype('savings')">🐷 Savings</button>
+        <button class="card-select-btn" id="subtypeHYS" onclick="selectAccountSubtype('hys_savings')">📈 HYS</button>
+      </div>
+    </div>
+    <div class="form-group" id="bankBalanceGroup" style="display:none">
+      <label class="form-label">Current Balance ($)</label>
+      <input type="number" class="form-input" id="newCardBalance" placeholder="e.g. 4500" step="0.01" inputmode="decimal">
+    </div>
     <div class="form-row" id="creditOnlyFields">
       <div class="form-group">
         <label class="form-label">Credit Limit ($)</label>
@@ -4083,6 +4134,27 @@ select.form-input {
 </div>
 </div>
 
+<!-- ═══ ACCOUNTS PAGE ═════════════════════════════ -->
+<div class="page" id="pageAccounts">
+<div class="page-title-bar">
+  <div>
+    <div class="page-subtitle">Bank · Cash</div>
+    <div class="page-title">Accounts</div>
+  </div>
+  <button class="fin-add-btn" onclick="openAddAccountFlow()">+ Account</button>
+</div>
+<div class="content">
+  <div id="accountsHero"></div>
+  <div class="section-title" style="margin-top:18px">Your Accounts</div>
+  <div id="accountsList"></div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin:20px 0 10px">
+    <div class="section-title" style="margin:0">Scheduled</div>
+    <button class="fin-add-btn" onclick="openScheduleModal()">+ Schedule</button>
+  </div>
+  <div id="schedulesList"></div>
+</div>
+</div>
+
 <!-- ═══ MODALS ═════════════════════════════════════ -->
 <!-- Add Payment Modal -->
 <div class="modal-overlay" id="addPaymentModal" onclick="if(event.target===this)closeModal('addPaymentModal')">
@@ -4091,6 +4163,12 @@ select.form-input {
     <div class="form-group">
       <label class="form-label">Card</label>
       <select class="form-input" id="paymentCardSelect"></select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Pay From <span style="color:var(--text-muted);font-weight:400">(optional — deducts balance)</span></label>
+      <select class="form-input" id="paymentSourceAccount">
+        <option value="">— No account selected —</option>
+      </select>
     </div>
     <div class="form-group">
       <label class="form-label">Payment Amount ($)</label>
@@ -4132,6 +4210,12 @@ select.form-input {
       </select>
     </div>
     <div class="form-group" id="incomeStartDateGroup"><label class="form-label">Start / Pay Date</label><input type="date" class="form-input" id="incomeDate"></div>
+    <div class="form-group">
+      <label class="form-label">Deposit To <span style="color:var(--text-muted);font-weight:400">(optional — credits balance)</span></label>
+      <select class="form-input" id="incomeDestinationAccount">
+        <option value="">— No account selected —</option>
+      </select>
+    </div>
     <div class="form-group"><label class="form-label">Note (optional)</label><input type="text" class="form-input" id="incomeNote" placeholder="e.g. March paycheck"></div>
     <button class="submit-btn" onclick="saveIncome()">Save Income</button>
   </div>
@@ -4165,6 +4249,60 @@ select.form-input {
     <div class="form-group"><label class="form-label">Minimum Payment ($)</label><input type="number" class="form-input" id="balanceMinPay" placeholder="35" step="0.01" inputmode="decimal"></div>
     <input type="hidden" id="balanceCardId">
     <button class="submit-btn" onclick="saveCardBalance()">Save</button>
+  </div>
+</div>
+
+<!-- Set Account Balance (bank/debit) -->
+<div class="modal-overlay" id="setAccountBalanceModal" onclick="if(event.target===this)closeModal('setAccountBalanceModal')">
+  <div class="modal">
+    <div class="modal-top"><h2>Update Balance</h2><button class="modal-close" onclick="closeModal('setAccountBalanceModal')">✕</button></div>
+    <div id="setAccountBalanceName" style="font-size:13px;color:var(--text-dim);margin-bottom:14px"></div>
+    <div class="form-group"><label class="form-label">Current Balance ($)</label><input type="number" class="form-input" id="setAccountBalanceAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
+    <input type="hidden" id="setAccountBalanceId">
+    <button class="submit-btn" onclick="saveAccountBalance()">Save Balance</button>
+  </div>
+</div>
+
+<!-- Schedule (transfer / outflow / card_payment / income) -->
+<div class="modal-overlay" id="scheduleModal" onclick="if(event.target===this)closeModal('scheduleModal')">
+  <div class="modal">
+    <div class="modal-top"><h2 id="scheduleModalTitle">New Schedule</h2><button class="modal-close" onclick="closeModal('scheduleModal')">✕</button></div>
+    <div class="form-group">
+      <label class="form-label">Kind</label>
+      <div class="card-select-group" style="flex-wrap:wrap">
+        <button class="card-select-btn selected" id="schedKindOutflow" onclick="selectScheduleKind('outflow')">💸 Outflow</button>
+        <button class="card-select-btn" id="schedKindTransfer" onclick="selectScheduleKind('transfer')">🔁 Transfer</button>
+        <button class="card-select-btn" id="schedKindCardPayment" onclick="selectScheduleKind('card_payment')">💳 Card Pay</button>
+        <button class="card-select-btn" id="schedKindIncome" onclick="selectScheduleKind('income')">💵 Income</button>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Label</label><input type="text" class="form-input" id="schedLabel" placeholder="e.g., Rent, Move to HYS"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="schedAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
+      <div class="form-group"><label class="form-label">Day of Month</label><input type="number" class="form-input" id="schedDay" min="1" max="31" placeholder="1" inputmode="numeric"></div>
+    </div>
+    <div class="form-group" id="schedSourceGroup">
+      <label class="form-label">From Account</label>
+      <select class="form-input" id="schedSourceAccount"></select>
+    </div>
+    <div class="form-group" id="schedTargetGroup" style="display:none">
+      <label class="form-label">To Account</label>
+      <select class="form-input" id="schedTargetAccount"></select>
+    </div>
+    <div class="form-group" id="schedCardGroup" style="display:none">
+      <label class="form-label">Pay Toward Card</label>
+      <select class="form-input" id="schedCardSelect"></select>
+    </div>
+    <div class="form-group"><label class="form-label">Note (optional)</label><input type="text" class="form-input" id="schedNote" placeholder=""></div>
+    <div class="form-group">
+      <label class="form-label" style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <input type="checkbox" id="schedAutoApply" style="width:18px;height:18px;accent-color:var(--accent)">
+        Auto-apply on day of month
+      </label>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px">When on, the movement runs automatically and updates balances. Off keeps it informational.</div>
+    </div>
+    <input type="hidden" id="schedEditId">
+    <button class="submit-btn" id="schedSaveBtn" onclick="saveSchedule()">Save Schedule</button>
   </div>
 </div>
 
@@ -4525,10 +4663,12 @@ let cardPayments = {};
 let incomeEntries = [];
 let savingsGoals = [];
 let cardBalances = {};
+let scheduledMovements = []; // [{id, kind, sourceAccountId, targetAccountId, cardId, amount, dayOfMonth, label, note, active, autoApply, lastAppliedPeriod}]
 let nextIncomeId = 1;
 let nextGoalId = 1;
 let debtStrategy = 'avalanche';
 let selectedGoalIcon = '🎯';
+let newCardSubtype = null; // 'checking' | 'savings' | 'hys_savings' (only when type='bank')
 let currentMonth = new Date().getMonth();
 let currentYear = new Date().getFullYear();
 let selectedCard = 'all';
@@ -4678,6 +4818,7 @@ function _emptyCloudDeletes() {
   return {
     transactions: [], cards: [], subscriptions: [], card_payments: [],
     income_entries: [], savings_goals: [], sync_history: [],
+    scheduled_movements: [],
     card_balances: [],     // [{card_id}]
     budgets: [],           // [{key}]
     merchant_rules: [],    // [{merchant_key}]
@@ -4876,6 +5017,10 @@ async function onSupabaseSignIn(session) {
   dedupeTransactions();
   // Now that we have authoritative state, auto-post any due subscription charges
   autoPostSubscriptions();
+  // Apply any auto-flagged scheduled movements that are due this period.
+  // Must run AFTER loadFromCloud so we have the latest last_applied_period
+  // values, otherwise we'd risk firing a movement twice in one period.
+  if (typeof applyAutoSchedules === 'function') applyAutoSchedules();
   renderAll();
 
   // CRITICAL: flush any pending work from before sign-in (offline edits,
@@ -4963,24 +5108,26 @@ async function handleGmailSync() {
 async function loadFromCloud() {
   if (!currentUserId) return;
   try {
-    const [cardsData, txsData, subsData, paysData, balsData, budsData, incData, goalsData, rulesData, histData, procData, prefsData] = await Promise.all([
-      sbSelect('cards',            'select=*&order=created_at'),
-      sbSelect('transactions',     'select=*&order=tx_date.desc&limit=5000'),
-      sbSelect('subscriptions',    'select=*'),
-      sbSelect('card_payments',    'select=*&order=payment_date.desc'),
-      sbSelect('card_balances',    'select=*'),
-      sbSelect('budgets',          'select=*'),
-      sbSelect('income_entries',   'select=*&order=income_date.desc'),
-      sbSelect('savings_goals',    'select=*&order=created_at'),
-      sbSelect('merchant_rules',   'select=*'),
-      sbSelect('sync_history',     'select=*&order=sync_time.desc&limit=20'),
-      sbSelect('processed_emails', 'select=*'),
-      sbSelect('user_preferences', `select=*&user_id=eq.${currentUserId}&limit=1`),
+    const [cardsData, txsData, subsData, paysData, balsData, budsData, incData, goalsData, rulesData, histData, procData, prefsData, schedData] = await Promise.all([
+      sbSelect('cards',               'select=*&order=created_at'),
+      sbSelect('transactions',        'select=*&order=tx_date.desc&limit=5000'),
+      sbSelect('subscriptions',       'select=*'),
+      sbSelect('card_payments',       'select=*&order=payment_date.desc'),
+      sbSelect('card_balances',       'select=*'),
+      sbSelect('budgets',             'select=*'),
+      sbSelect('income_entries',      'select=*&order=income_date.desc'),
+      sbSelect('savings_goals',       'select=*&order=created_at'),
+      sbSelect('merchant_rules',      'select=*'),
+      sbSelect('sync_history',        'select=*&order=sync_time.desc&limit=20'),
+      sbSelect('processed_emails',    'select=*'),
+      sbSelect('user_preferences',    `select=*&user_id=eq.${currentUserId}&limit=1`),
+      sbSelect('scheduled_movements', 'select=*&order=created_at'),
     ]);
 
     CARDS = (cardsData || []).map(c => ({
       id: c.id, issuer: c.issuer, name: c.name, last4: c.last4, color: c.color,
       type: c.type || 'credit', creditLimit: Number(c.credit_limit) || 0, payDay: c.pay_day || 0,
+      accountSubtype: c.account_subtype || null,
     }));
     transactions = (txsData || []).map(t => ({
       id: t.id, amount: Number(t.amount), merchant: t.merchant, category: t.category,
@@ -5000,6 +5147,7 @@ async function loadFromCloud() {
       cardPayments[p.card_id].push({
         id: p.id, date: p.payment_date, amount: Number(p.amount),
         source: p.source || 'manual', note: p.note || undefined, emailId: p.email_id || undefined,
+        sourceAccountId: p.source_account_id || null,
       });
     });
     cardBalances = {};
@@ -5014,6 +5162,18 @@ async function loadFromCloud() {
     incomeEntries = (incData || []).map(i => ({
       id: i.id, amount: Number(i.amount), source: i.source, date: i.income_date,
       note: i.note, frequency: i.frequency, recurring: !!i.recurring, payDay: i.pay_day || 0,
+      destinationAccountId: i.destination_account_id || null,
+    }));
+    scheduledMovements = (schedData || []).map(s => ({
+      id: s.id, kind: s.kind, label: s.label, note: s.note || null,
+      sourceAccountId: s.source_account_id || null,
+      targetAccountId: s.target_account_id || null,
+      cardId: s.card_id || null,
+      amount: Number(s.amount) || 0,
+      dayOfMonth: Number(s.day_of_month) || 1,
+      active: s.active !== false,
+      autoApply: !!s.auto_apply,
+      lastAppliedPeriod: s.last_applied_period || null,
     }));
     savingsGoals = (goalsData || []).map(g => ({
       id: g.id, name: g.name, target: Number(g.target),
@@ -5194,12 +5354,14 @@ async function flushToCloud() {
   const dRules = take('merchant_rules');
   const dProc = take('processed_emails');
   const dC = take('cards');
+  const dSched = take('scheduled_movements');
   const deleteJobs = [];
   if (dT.length)    deleteJobs.push(sbDeleteIn('transactions', 'id', dT));
   if (dS.length)    deleteJobs.push(sbDeleteIn('subscriptions', 'id', dS));
   if (dP.length)    deleteJobs.push(sbDeleteIn('card_payments', 'id', dP));
   if (dI.length)    deleteJobs.push(sbDeleteIn('income_entries', 'id', dI));
   if (dG.length)    deleteJobs.push(sbDeleteIn('savings_goals', 'id', dG));
+  if (dSched.length)deleteJobs.push(sbDeleteIn('scheduled_movements', 'id', dSched));
   for (const b of dBud)  deleteJobs.push(sbDeleteEq('budgets',        { user_id: uid, key: b.key }));
   for (const b of dBal)  deleteJobs.push(sbDeleteEq('card_balances',  { user_id: uid, card_id: b.card_id }));
   for (const r of dRules)deleteJobs.push(sbDeleteEq('merchant_rules', { user_id: uid, merchant_key: r.merchant_key }));
@@ -5216,11 +5378,24 @@ async function flushToCloud() {
     id: c.id, user_id: uid, issuer: c.issuer, name: c.name, last4: c.last4,
     color: c.color, type: c.type || 'credit',
     credit_limit: Number(c.creditLimit) || 0, pay_day: Number(c.payDay) || 0,
+    account_subtype: c.accountSubtype || null,
   }));
   const incRows = incomeEntries.map(i => ({
     id: i.id, user_id: uid, amount: Number(i.amount), source: i.source, income_date: i.date,
     note: i.note || null, frequency: i.frequency || 'once',
     recurring: !!i.recurring, pay_day: Number(i.payDay) || 0,
+    destination_account_id: i.destinationAccountId || null,
+  }));
+  const schedRows = scheduledMovements.map(s => ({
+    id: s.id, user_id: uid, kind: s.kind, label: s.label, note: s.note || null,
+    source_account_id: s.sourceAccountId || null,
+    target_account_id: s.targetAccountId || null,
+    card_id: s.cardId || null,
+    amount: Number(s.amount) || 0,
+    day_of_month: Number(s.dayOfMonth) || 1,
+    active: s.active !== false,
+    auto_apply: !!s.autoApply,
+    last_applied_period: s.lastAppliedPeriod || null,
   }));
   const goalRows = savingsGoals.map(g => ({
     id: g.id, user_id: uid, name: g.name, target: Number(g.target),
@@ -5252,6 +5427,7 @@ async function flushToCloud() {
     upsertChunked('budgets', budRows, 'user_id,key'),
     upsertChunked('sync_history', histRows, 'id'),
     upsertChunked('processed_emails', procRows, 'user_id,email_id,kind'),
+    upsertChunked('scheduled_movements', schedRows, 'id'),
     sbUpsert('user_preferences', [{
       user_id: uid, theme: document.body.dataset.theme || 'light',
       debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
@@ -5281,6 +5457,7 @@ async function flushToCloud() {
         id: p.id, user_id: uid, card_id: cardId, payment_date: p.date,
         amount: Number(p.amount), source: p.source || 'manual',
         note: p.note || null, email_id: p.emailId || null,
+        source_account_id: p.sourceAccountId || null,
       });
     });
   });
@@ -6198,6 +6375,11 @@ function selectCardType(type) {
   // Credit limit + pay day only apply to credit cards
   const creditFields = document.getElementById('creditOnlyFields');
   if (creditFields) creditFields.style.display = (type === 'credit') ? '' : 'none';
+  // Bank-account subtype + opening balance only when type='bank'
+  const subGroup = document.getElementById('accountSubtypeGroup');
+  if (subGroup) subGroup.style.display = (type === 'bank') ? '' : 'none';
+  const balGroup = document.getElementById('bankBalanceGroup');
+  if (balGroup) balGroup.style.display = (type === 'bank' || type === 'debit') ? '' : 'none';
   // Bank type: replace credit-card name list with generic account types
   const sel = document.getElementById('newCardName');
   if (sel) {
@@ -6205,11 +6387,25 @@ function selectCardType(type) {
       sel.innerHTML = '<option value="">Select account type...</option>'
         + '<option value="Checking">Checking</option>'
         + '<option value="Savings">Savings</option>'
+        + '<option value="HYS Savings">HYS Savings</option>'
         + '<option value="Money Market">Money Market</option>';
     } else {
       // Restore credit-card list for the currently-selected issuer
       onCardIssuerChange();
     }
+  }
+}
+
+function selectAccountSubtype(sub) {
+  newCardSubtype = sub;
+  document.getElementById('subtypeChecking')?.classList.toggle('selected', sub === 'checking');
+  document.getElementById('subtypeSavings')?.classList.toggle('selected', sub === 'savings');
+  document.getElementById('subtypeHYS')?.classList.toggle('selected', sub === 'hys_savings');
+  // Mirror the dropdown name for convenience
+  const sel = document.getElementById('newCardName');
+  if (sel) {
+    const map = { checking: 'Checking', savings: 'Savings', hys_savings: 'HYS Savings' };
+    if (map[sub]) sel.value = map[sub];
   }
 }
 
@@ -6583,6 +6779,7 @@ function renderAll() {
   renderCategories(getFiltered(true));
   renderTransactions(f);
   renderSyncHistory(); renderSettingsCards();
+  if (typeof renderCashTile === 'function') renderCashTile();
 }
 
 function selectCategory(catId) {
@@ -6968,6 +7165,7 @@ function showPage(id, btn) {
   if(id==='pageGoals') renderGoals();
   if(id==='pageDebt') renderDebtPlanner();
   if(id==='pagePayments') renderPaymentsPage();
+  if(id==='pageAccounts') renderAccountsPage();
 }
 
 function exportData() {
@@ -6981,7 +7179,7 @@ function exportData() {
 function clearAllData() {
   if (confirm('Clear ALL data? This removes everything including income, goals, and balances.')) {
     transactions=[]; CARDS=[]; budgets={}; subscriptions=[];
-    cardPayments={}; incomeEntries=[]; savingsGoals=[]; cardBalances={};
+    cardPayments={}; incomeEntries=[]; savingsGoals=[]; cardBalances={}; scheduledMovements=[];
     nextId=1; nextCardId=100; nextSubId=1; nextIncomeId=1; nextGoalId=1;
     syncHistory=[]; processedEmailIds=new Set(); processedPaymentEmailIds=new Set(); merchantRules={};
     saveToStorage(); location.reload();
@@ -6999,10 +7197,16 @@ function openAddCardModal() {
   document.getElementById('newCardLast4').value='';
   const lim=document.getElementById('newCardLimit'); if(lim)lim.value='';
   const pay=document.getElementById('newCardPayDay'); if(pay)pay.value='';
-  newCardType='credit'; newCardColor='#6c5ce7';
+  const bal=document.getElementById('newCardBalance'); if(bal)bal.value='';
+  newCardType='credit'; newCardColor='#6c5ce7'; newCardSubtype=null;
   document.getElementById('cardTypeCredit').classList.add('selected');
   document.getElementById('cardTypeDebit').classList.remove('selected');
   document.getElementById('cardTypeBank')?.classList.remove('selected');
+  document.getElementById('subtypeChecking')?.classList.remove('selected');
+  document.getElementById('subtypeSavings')?.classList.remove('selected');
+  document.getElementById('subtypeHYS')?.classList.remove('selected');
+  const subGroup=document.getElementById('accountSubtypeGroup'); if(subGroup)subGroup.style.display='none';
+  const balGroup=document.getElementById('bankBalanceGroup'); if(balGroup)balGroup.style.display='none';
   const creditFields=document.getElementById('creditOnlyFields'); if(creditFields)creditFields.style.display='';
   renderColorPicker();
 }
@@ -7014,14 +7218,36 @@ function saveNewCard() {
   const last4=document.getElementById('newCardLast4').value.trim();
   const creditLimit = newCardType === 'credit' ? (parseFloat(document.getElementById('newCardLimit')?.value)||0) : 0;
   const payDay = newCardType === 'credit' ? (parseInt(document.getElementById('newCardPayDay')?.value)||0) : 0;
+  const accountSubtype = newCardType === 'bank' ? (newCardSubtype || null) : null;
+  const openingBalance = (newCardType === 'bank' || newCardType === 'debit')
+    ? (parseFloat(document.getElementById('newCardBalance')?.value) || 0)
+    : 0;
   if(!issuer||!last4||last4.length!==4){alert('Please fill issuer and last 4 digits');return;}
-  const fallbackName = newCardType === 'bank' ? `${issuer} Checking` : `${issuer} Card`;
+  if(newCardType === 'bank' && !accountSubtype){alert('Pick Checking, Savings, or HYS for bank accounts');return;}
+  const fallbackName = newCardType === 'bank' ? `${issuer} ${accountSubtype === 'hys_savings' ? 'HYS' : (accountSubtype || 'Checking')}` : `${issuer} Card`;
   const name=customName||cardName||fallbackName;
   const id=crypto.randomUUID();
-  CARDS.push({id,issuer,name,last4,color:newCardColor,type:newCardType,creditLimit,payDay});
+  CARDS.push({id,issuer,name,last4,color:newCardColor,type:newCardType,creditLimit,payDay,accountSubtype});
+  // Seed the balance row so the account starts with the entered amount.
+  if (openingBalance > 0) {
+    if (!cardBalances) cardBalances = {};
+    cardBalances[id] = {
+      statementBalance: openingBalance, apr: 0, minPay: 0,
+      lastUpdated: ptDateStr(),
+    };
+  }
   saveToStorage(); closeModal('addCardModal'); renderAll(); renderSettingsCards();
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
   const icon = newCardType === 'bank' ? '🏦' : newCardType === 'debit' ? '🏧' : '💳';
   showSyncBar('success',icon,`<strong>${name}</strong> added`);
+}
+
+/** Open the Add Card modal pre-set to Bank → Checking — used by the
+ *  Accounts page's "+ Account" button to skip a couple of taps. */
+function openAddAccountFlow() {
+  openAddCardModal();
+  selectCardType('bank');
+  selectAccountSubtype('checking');
 }
 
 // ══════════════════════════════════════════════════════
@@ -7106,6 +7332,13 @@ function onFrequencyChange(){
 
 function openIncomeModal(){
   document.getElementById('addIncomeModal').classList.add('open');
+  // Populate destination-account dropdown with bank + debit accounts.
+  const dstSel = document.getElementById('incomeDestinationAccount');
+  if (dstSel) {
+    const accounts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+    dstSel.innerHTML = '<option value="">— No account selected —</option>'
+      + accounts.map(a => `<option value="${a.id}">${a.name} ($${(cardBalances[a.id]?.statementBalance || 0).toFixed(2)})</option>`).join('');
+  }
   document.getElementById('incomeAmount').value='';
   document.getElementById('incomeNote').value='';
   document.getElementById('incomeDate').value=ptDateStr();
@@ -7119,13 +7352,20 @@ function saveIncome(){
   const date=document.getElementById('incomeDate').value;
   const note=document.getElementById('incomeNote').value.trim();
   const frequency=document.getElementById('incomeFrequency').value;
+  const destinationAccountId=document.getElementById('incomeDestinationAccount')?.value || null;
   if(!amount||amount<=0||!date){alert('Please enter amount and date');return;}
   // For recurring entries, store payDay
   let payDay=0, recurring=false;
   if(frequency==='monthly'){recurring=true;payDay=new Date(date + 'T12:00:00').getDate();}
   else if(frequency==='biweekly'||frequency==='weekly'){recurring=true;payDay=0;}// use date as anchor
-  incomeEntries.push({id:crypto.randomUUID(),amount,source,date,note,frequency,recurring,payDay});
+  incomeEntries.push({id:crypto.randomUUID(),amount,source,date,note,frequency,recurring,payDay,destinationAccountId});
+  // Credit the destination account so its balance stays in sync. We only do
+  // this for one-time entries — recurring ones get applied via the auto-apply
+  // path each period (otherwise a recurring monthly entry would credit the
+  // account once and then never again).
+  if (destinationAccountId && frequency === 'once') adjustAccountBalance(destinationAccountId, +amount);
   saveToStorage(); closeModal('addIncomeModal'); renderFinanceHub();
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
   showSyncBar('success','💵',`Income of <strong>$${amount.toLocaleString()}</strong> logged`);
 }
 
@@ -7385,6 +7625,13 @@ function renderCashFlowCalendar(){
   subscriptions.filter(s=>s.active).forEach(s=>{const day=s.debitDay||1;addEvent(day,'sub',s.name,s.amount);});
   CARDS.forEach(card=>{if(card.payDay)addEvent(card.payDay,'payment',card.name+' due',cardBalances[card.id]?.statementBalance||0);});
   getIncomeOccurrencesInMonth(year,month).forEach(e=>addEvent(e.day,'income',e.label,e.amount));
+  // Scheduled movements — show on their day_of_month, mapped to cf-event types.
+  (scheduledMovements||[]).filter(s=>s.active).forEach(s=>{
+    const evType = s.kind === 'income' ? 'income'
+                 : s.kind === 'card_payment' ? 'payment'
+                 : 'sub'; // outflow / transfer surface as the neutral 'sub' style
+    addEvent(s.dayOfMonth || 1, evType, s.label, s.amount);
+  });
 
   // Tight days: only UPCOMING days (today or future in current month, all days in future months)
   const warnings=[];
@@ -7703,6 +7950,13 @@ function openAddPaymentModal(cardId) {
   const sel = document.getElementById('paymentCardSelect');
   sel.innerHTML = CARDS.filter(c=>(c.type||'credit')==='credit')
     .map(c=>`<option value="${c.id}" ${c.id===cardId?'selected':''}>${c.name} •••• ${c.last4}</option>`).join('');
+  // Source-account dropdown: bank + debit cards.
+  const srcSel = document.getElementById('paymentSourceAccount');
+  if (srcSel) {
+    const accounts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
+    srcSel.innerHTML = '<option value="">— No account selected —</option>'
+      + accounts.map(a => `<option value="${a.id}">${a.name} ($${(cardBalances[a.id]?.statementBalance || 0).toFixed(2)})</option>`).join('');
+  }
   document.getElementById('paymentAmountInput').value = '';
   document.getElementById('paymentDateInput').value = ptDateStr();
   document.getElementById('paymentNoteInput').value = '';
@@ -7710,6 +7964,7 @@ function openAddPaymentModal(cardId) {
 
 function saveManualPayment() {
   const cardId = document.getElementById('paymentCardSelect').value;
+  const sourceAccountId = document.getElementById('paymentSourceAccount')?.value || null;
   const amount = parseFloat(document.getElementById('paymentAmountInput').value);
   const date = document.getElementById('paymentDateInput').value;
   const note = document.getElementById('paymentNoteInput').value.trim();
@@ -7718,8 +7973,10 @@ function saveManualPayment() {
   if (!cardPayments[cardId]) cardPayments[cardId] = [];
   const exists = cardPayments[cardId].some(p => p.date === date && Math.abs(p.amount - amount) < 0.01);
   if (!exists) {
-    cardPayments[cardId].unshift({ id: crypto.randomUUID(), date, amount, source: 'manual', note });
+    cardPayments[cardId].unshift({ id: crypto.randomUUID(), date, amount, source: 'manual', note, sourceAccountId });
     if (cardPayments[cardId].length > 50) cardPayments[cardId].pop();
+    // Deduct from the source account so its balance stays in sync.
+    if (sourceAccountId) adjustAccountBalance(sourceAccountId, -amount);
   }
   prunePayments();
   saveToStorage();
@@ -7727,6 +7984,7 @@ function saveManualPayment() {
   showSyncBar('success', '✅', `Payment of <strong>$${amount.toFixed(2)}</strong> logged`);
   renderPaymentsPage();
   renderFinCardBalances(); // refresh Finance Hub card balances if visible
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
 }
 
 function deletePayment(cardId, pDate, pAmount) {
@@ -8937,6 +9195,359 @@ function toggleTheme() {
   } catch(e) {}
   // Persist theme to cloud via user_preferences
   scheduleFlush();
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ACCOUNTS / SCHEDULES
+// User-facing: Accounts page, Set Balance modal, Schedule modal,
+// auto-apply runner, Cash on Hand tile renderer. Wired up to the Supabase
+// `cards` (with account_subtype), `card_balances`, `card_payments`
+// (source_account_id), `income_entries` (destination_account_id), and
+// `scheduled_movements` tables added in the migration.
+// ════════════════════════════════════════════════════════════════════════
+
+const ACCOUNT_SUBTYPE_LABEL = { checking: 'Checking', savings: 'Savings', hys_savings: 'HYS Savings' };
+const ACCOUNT_SUBTYPE_ICON  = { checking: '💵', savings: '🐷', hys_savings: '📈' };
+
+function isCashAccount(card) {
+  return card && (card.type === 'bank' || card.type === 'debit');
+}
+
+function getCashAccounts() {
+  return CARDS.filter(isCashAccount);
+}
+
+function totalCashOnHand() {
+  return getCashAccounts().reduce(
+    (s, a) => s + (cardBalances[a.id]?.statementBalance || 0),
+    0,
+  );
+}
+
+/** Mutate a bank/debit account's stored balance by `delta` and persist. */
+function adjustAccountBalance(accountId, delta) {
+  if (!accountId || !delta) return;
+  if (!cardBalances) cardBalances = {};
+  if (!cardBalances[accountId]) {
+    cardBalances[accountId] = { statementBalance: 0, apr: 0, minPay: 0, lastUpdated: ptDateStr() };
+  }
+  cardBalances[accountId].statementBalance =
+    Number(cardBalances[accountId].statementBalance || 0) + Number(delta);
+  cardBalances[accountId].lastUpdated = ptDateStr();
+  saveToStorage();
+  renderCashTile();
+}
+
+// ─── Cash on Hand tile (Dashboard) ─────────────────────────────────────
+function renderCashTile() {
+  const tile = document.getElementById('cashTile');
+  if (!tile) return;
+  const accounts = getCashAccounts();
+  if (accounts.length === 0) { tile.style.display = 'none'; return; }
+  const total = totalCashOnHand();
+  tile.style.display = '';
+  tile.innerHTML = `
+    <div class="cash-tile-icon">🏦</div>
+    <div class="cash-tile-body">
+      <div class="cash-tile-label">Cash on hand</div>
+      <div class="cash-tile-value">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+      <div class="cash-tile-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
+    </div>
+    <svg class="cash-tile-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+  `;
+}
+
+// ─── Accounts page renderer ────────────────────────────────────────────
+function renderAccountsPage() {
+  renderCashTile();
+  const heroEl = document.getElementById('accountsHero');
+  const listEl = document.getElementById('accountsList');
+  const schedEl = document.getElementById('schedulesList');
+  if (!listEl) return;
+
+  const accounts = getCashAccounts();
+  if (heroEl) {
+    if (accounts.length === 0) {
+      heroEl.innerHTML = `<div style="border:1px dashed var(--border);border-radius:var(--radius);padding:24px;text-align:center;color:var(--text-dim)">
+        <div style="font-size:30px;margin-bottom:6px">🏦</div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:4px">No accounts yet</div>
+        <div style="font-size:13px">Tap “+ Account” to add a checking, savings, or HYS account.</div>
+      </div>`;
+    } else {
+      const total = totalCashOnHand();
+      heroEl.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:var(--radius);padding:18px">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted)">Total Cash on Hand</div>
+        <div style="font-family:var(--font-mono);font-size:32px;font-weight:600;letter-spacing:-0.02em;color:var(--green);font-variant-numeric:tabular-nums lining-nums;margin-top:4px">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-top:4px">${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
+      </div>`;
+    }
+  }
+
+  if (accounts.length === 0) {
+    listEl.innerHTML = '';
+  } else {
+    listEl.innerHTML = accounts.map(a => {
+      const bal = cardBalances[a.id]?.statementBalance || 0;
+      const updated = cardBalances[a.id]?.lastUpdated || '—';
+      const sub = a.accountSubtype ? `${ACCOUNT_SUBTYPE_ICON[a.accountSubtype] || ''} ${ACCOUNT_SUBTYPE_LABEL[a.accountSubtype] || a.accountSubtype}` : (a.type === 'debit' ? '🏧 Debit' : '🏦 Bank');
+      return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;display:flex;align-items:center;gap:12px">
+        <div style="width:6px;height:48px;border-radius:3px;background:${a.color || 'var(--accent)'};flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px">${a.name}</div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${sub} · •••• ${a.last4} · Updated ${updated}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-family:var(--font-mono);font-weight:600;font-size:18px;font-variant-numeric:tabular-nums lining-nums">$${bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+          <button onclick="openSetAccountBalanceModal('${a.id}')" style="margin-top:4px;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer">Update</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  if (schedEl) {
+    if (scheduledMovements.length === 0) {
+      schedEl.innerHTML = `<div style="border:1px dashed var(--border);border-radius:var(--radius);padding:18px;text-align:center;color:var(--text-dim);font-size:13px">No schedules yet — tap “+ Schedule” to add one.</div>`;
+    } else {
+      schedEl.innerHTML = scheduledMovements
+        .slice()
+        .sort((a, b) => (a.dayOfMonth || 0) - (b.dayOfMonth || 0))
+        .map(s => renderScheduleRow(s))
+        .join('');
+    }
+  }
+}
+
+function renderScheduleRow(s) {
+  const KIND_ICON = { transfer: '🔁', outflow: '💸', card_payment: '💳', income: '💵' };
+  const KIND_LABEL = { transfer: 'Transfer', outflow: 'Outflow', card_payment: 'Card Pay', income: 'Income' };
+  const accountName = (id) => (CARDS.find(c => c.id === id)?.name) || '—';
+  let tail = '';
+  if (s.kind === 'transfer')      tail = `${accountName(s.sourceAccountId)} → ${accountName(s.targetAccountId)}`;
+  else if (s.kind === 'outflow')      tail = `From ${accountName(s.sourceAccountId)}`;
+  else if (s.kind === 'card_payment') tail = `${accountName(s.sourceAccountId)} → ${accountName(s.cardId)}`;
+  else                                tail = `Into ${accountName(s.targetAccountId)}`;
+  const auto = s.autoApply ? `<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green-soft);color:var(--green);padding:2px 6px;border-radius:4px;margin-left:6px">AUTO</span>` : '';
+  const inactive = !s.active ? `<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--bg-elev,var(--bg-card-hover));color:var(--text-muted);padding:2px 6px;border-radius:4px;margin-left:6px">PAUSED</span>` : '';
+  return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px">
+    <div style="font-size:22px;flex-shrink:0">${KIND_ICON[s.kind] || '·'}</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600;font-size:14px">${s.label}${auto}${inactive}</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${KIND_LABEL[s.kind]} · Day ${s.dayOfMonth} · ${tail}</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-family:var(--font-mono);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums lining-nums">$${(s.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+      <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px">
+        <button onclick="openScheduleModal('${s.id}')" style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:transparent;color:var(--text-dim);font-size:10px;font-weight:600;cursor:pointer">Edit</button>
+        <button onclick="deleteSchedule('${s.id}')" style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:transparent;color:var(--red);font-size:10px;font-weight:600;cursor:pointer">✕</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ─── Set Account Balance modal ────────────────────────────────────────
+function openSetAccountBalanceModal(accountId) {
+  const a = CARDS.find(c => c.id === accountId);
+  if (!a) return;
+  document.getElementById('setAccountBalanceModal').classList.add('open');
+  document.getElementById('setAccountBalanceName').innerHTML = `<strong>${a.name}</strong> •••• ${a.last4}`;
+  document.getElementById('setAccountBalanceId').value = accountId;
+  document.getElementById('setAccountBalanceAmount').value = String(cardBalances[accountId]?.statementBalance || '');
+}
+
+function saveAccountBalance() {
+  const id = document.getElementById('setAccountBalanceId').value;
+  const amt = parseFloat(document.getElementById('setAccountBalanceAmount').value);
+  if (!id || !Number.isFinite(amt)) { alert('Enter a valid balance'); return; }
+  if (!cardBalances) cardBalances = {};
+  cardBalances[id] = {
+    ...(cardBalances[id] || { apr: 0, minPay: 0 }),
+    statementBalance: amt,
+    lastUpdated: ptDateStr(),
+  };
+  saveToStorage();
+  closeModal('setAccountBalanceModal');
+  renderAccountsPage();
+  renderCashTile();
+  showSyncBar('success', '🏦', `Balance updated to <strong>$${amt.toFixed(2)}</strong>`);
+}
+
+// ─── Schedule modal ───────────────────────────────────────────────────
+let scheduleKindCurrent = 'outflow';
+
+function openScheduleModal(id = null) {
+  document.getElementById('scheduleModal').classList.add('open');
+  document.getElementById('scheduleModalTitle').textContent = id ? 'Edit Schedule' : 'New Schedule';
+  document.getElementById('schedSaveBtn').textContent = id ? 'Save' : 'Create';
+  document.getElementById('schedEditId').value = id || '';
+
+  const accounts = getCashAccounts();
+  const accOpts = accounts.map(a => `<option value="${a.id}">${a.name} •••• ${a.last4}</option>`).join('');
+  document.getElementById('schedSourceAccount').innerHTML = accOpts;
+  document.getElementById('schedTargetAccount').innerHTML = accOpts;
+  const credits = CARDS.filter(c => (c.type || 'credit') === 'credit');
+  document.getElementById('schedCardSelect').innerHTML = credits
+    .map(c => `<option value="${c.id}">${c.name} •••• ${c.last4}</option>`).join('');
+
+  if (id) {
+    const s = scheduledMovements.find(x => x.id === id);
+    if (s) {
+      selectScheduleKind(s.kind);
+      document.getElementById('schedLabel').value = s.label || '';
+      document.getElementById('schedAmount').value = s.amount || '';
+      document.getElementById('schedDay').value = s.dayOfMonth || '';
+      if (s.sourceAccountId) document.getElementById('schedSourceAccount').value = s.sourceAccountId;
+      if (s.targetAccountId) document.getElementById('schedTargetAccount').value = s.targetAccountId;
+      if (s.cardId)          document.getElementById('schedCardSelect').value = s.cardId;
+      document.getElementById('schedNote').value = s.note || '';
+      document.getElementById('schedAutoApply').checked = !!s.autoApply;
+    }
+  } else {
+    selectScheduleKind('outflow');
+    document.getElementById('schedLabel').value = '';
+    document.getElementById('schedAmount').value = '';
+    document.getElementById('schedDay').value = '';
+    document.getElementById('schedNote').value = '';
+    document.getElementById('schedAutoApply').checked = false;
+  }
+}
+
+function selectScheduleKind(kind) {
+  scheduleKindCurrent = kind;
+  ['outflow', 'transfer', 'card_payment', 'income'].forEach(k => {
+    const id = 'schedKind' + (k === 'card_payment' ? 'CardPayment' : k.charAt(0).toUpperCase() + k.slice(1));
+    document.getElementById(id)?.classList.toggle('selected', k === kind);
+  });
+  // Toggle group visibility per kind:
+  // - outflow: source only
+  // - transfer: source + target
+  // - card_payment: source + card
+  // - income: target only
+  const showSource = (kind !== 'income');
+  const showTarget = (kind === 'transfer' || kind === 'income');
+  const showCard   = (kind === 'card_payment');
+  document.getElementById('schedSourceGroup').style.display = showSource ? '' : 'none';
+  document.getElementById('schedTargetGroup').style.display = showTarget ? '' : 'none';
+  document.getElementById('schedCardGroup').style.display   = showCard   ? '' : 'none';
+}
+
+function saveSchedule() {
+  const editId = document.getElementById('schedEditId').value || null;
+  const kind = scheduleKindCurrent;
+  const label = document.getElementById('schedLabel').value.trim();
+  const amount = parseFloat(document.getElementById('schedAmount').value);
+  const day = parseInt(document.getElementById('schedDay').value, 10);
+  const sourceAccountId = document.getElementById('schedSourceGroup').style.display !== 'none'
+    ? (document.getElementById('schedSourceAccount').value || null) : null;
+  const targetAccountId = document.getElementById('schedTargetGroup').style.display !== 'none'
+    ? (document.getElementById('schedTargetAccount').value || null) : null;
+  const cardId = document.getElementById('schedCardGroup').style.display !== 'none'
+    ? (document.getElementById('schedCardSelect').value || null) : null;
+  const note = document.getElementById('schedNote').value.trim() || null;
+  const autoApply = document.getElementById('schedAutoApply').checked;
+
+  if (!label) { alert('Enter a label (e.g., Rent)'); return; }
+  if (!Number.isFinite(amount) || amount <= 0) { alert('Enter a positive amount'); return; }
+  if (!Number.isFinite(day) || day < 1 || day > 31) { alert('Day must be 1–31'); return; }
+  if (kind !== 'income'   && !sourceAccountId) { alert('Pick a source account'); return; }
+  if (kind === 'transfer' && !targetAccountId) { alert('Pick a destination account'); return; }
+  if (kind === 'income'   && !targetAccountId) { alert('Pick a destination account'); return; }
+  if (kind === 'card_payment' && !cardId)      { alert('Pick a card'); return; }
+
+  if (editId) {
+    const s = scheduledMovements.find(x => x.id === editId);
+    if (s) {
+      Object.assign(s, { kind, label, amount, dayOfMonth: day, sourceAccountId, targetAccountId, cardId, note, autoApply });
+    }
+  } else {
+    scheduledMovements.push({
+      id: crypto.randomUUID(), kind, label, amount, dayOfMonth: day,
+      sourceAccountId, targetAccountId, cardId, note,
+      active: true, autoApply, lastAppliedPeriod: null,
+    });
+  }
+  saveToStorage();
+  closeModal('scheduleModal');
+  renderAccountsPage();
+  renderCashFlowCalendar();
+  showSyncBar('success', '📅', `Schedule <strong>${label}</strong> saved`);
+}
+
+function deleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  cloudDeletes.scheduled_movements.push(id);
+  scheduledMovements = scheduledMovements.filter(s => s.id !== id);
+  saveToStorage();
+  renderAccountsPage();
+  renderCashFlowCalendar();
+}
+
+// ─── Auto-apply runner ────────────────────────────────────────────────
+// Run after loadFromCloud. For every active+autoApply schedule, if the
+// current period (YYYY-MM in Pacific time) is past last_applied_period
+// and today's day-of-month >= the schedule's day, apply it.
+function applyAutoSchedules() {
+  if (!scheduledMovements || scheduledMovements.length === 0) return;
+  const now = new Date();
+  const periodKey = new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric', month: '2-digit', timeZone: 'America/Los_Angeles',
+  }).format(now); // 'YYYY-MM'
+  const todayDay = parseInt(
+    new Intl.DateTimeFormat('en-CA', { day: 'numeric', timeZone: 'America/Los_Angeles' }).format(now),
+    10,
+  );
+
+  let appliedCount = 0;
+  for (const s of scheduledMovements) {
+    if (!s.active || !s.autoApply) continue;
+    if (todayDay < (s.dayOfMonth || 1)) continue;
+    if (s.lastAppliedPeriod && s.lastAppliedPeriod >= periodKey) continue;
+
+    try {
+      applyOneSchedule(s, periodKey);
+      s.lastAppliedPeriod = periodKey;
+      appliedCount++;
+    } catch (e) {
+      console.warn('[auto-schedule] failed to apply', s.label, e);
+    }
+  }
+
+  if (appliedCount > 0) {
+    saveToStorage();
+    showSyncBar('success', '⚙️', `Auto-applied <strong>${appliedCount}</strong> scheduled item${appliedCount === 1 ? '' : 's'}`);
+  }
+}
+
+function applyOneSchedule(s, periodKey) {
+  const dateStr = `${periodKey}-${String(s.dayOfMonth).padStart(2, '0')}`;
+  if (s.kind === 'transfer') {
+    if (s.sourceAccountId) adjustAccountBalance(s.sourceAccountId, -s.amount);
+    if (s.targetAccountId) adjustAccountBalance(s.targetAccountId, +s.amount);
+  } else if (s.kind === 'outflow') {
+    if (s.sourceAccountId) adjustAccountBalance(s.sourceAccountId, -s.amount);
+  } else if (s.kind === 'card_payment') {
+    if (s.sourceAccountId) adjustAccountBalance(s.sourceAccountId, -s.amount);
+    if (s.cardId) {
+      if (!cardPayments) cardPayments = {};
+      if (!cardPayments[s.cardId]) cardPayments[s.cardId] = [];
+      cardPayments[s.cardId].unshift({
+        id: crypto.randomUUID(), date: dateStr, amount: s.amount,
+        source: 'auto', note: s.label, sourceAccountId: s.sourceAccountId,
+      });
+    }
+  } else if (s.kind === 'income') {
+    if (s.targetAccountId) adjustAccountBalance(s.targetAccountId, +s.amount);
+    incomeEntries.push({
+      id: crypto.randomUUID(),
+      amount: s.amount,
+      source: 'other',
+      date: dateStr,
+      note: s.label,
+      frequency: 'once',
+      recurring: false,
+      payDay: 0,
+      destinationAccountId: s.targetAccountId,
+    });
+  }
 }
 
 // ═══ TAB BAR: sync active state with current page ═══
