@@ -5536,7 +5536,12 @@ function dedupeTransactions() {
   const seen = new Map();  // key → first-seen tx
   const dupes = [];        // duplicates to remove
   for (const tx of transactions) {
-    const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || ''].join('|');
+    // Include the time so two legit charges at the same merchant for the
+    // same amount on the same day (e.g., a morning + afternoon LA Metro
+    // fare) don't collapse into one. Time defaults to '12:00' for rows
+    // missing it; if both default, they DO collapse — accept that
+    // narrow false-positive over the much worse data-loss case.
+    const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || '', tx.time || ''].join('|');
     if (seen.has(key)) {
       dupes.push(tx);
     } else {
@@ -5857,19 +5862,38 @@ function parseEmailToTransaction(msg, issuer, issuerCards) {
     try { bodyText = decodeBase64(msg.payload.body.data); } catch(e) {}
   }
 
-  // Keep both line-aware and collapsed versions
+  // Keep three views of the email text:
+  //  * fullTextLines : raw subject + body (line-preserving). Used by the
+  //    Amex per-line scanner since Amex puts amounts on their own line.
+  //  * fullText      : whitespace-collapsed subject + body. Good for
+  //    merchant / card / footer-line matching.
+  //  * bodyOnly      : whitespace-collapsed body alone — NEVER includes
+  //    the subject. Used for amount extraction so an alert-threshold
+  //    subject like "You made a purchase over $1.00" doesn't get picked
+  //    up as the charge amount; the real charge ($35.96) lives in body.
   const fullTextLines = subject + '\n' + bodyText;
   const fullText = fullTextLines.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
+  const bodyOnly = bodyText.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
 
-  if (issuer === 'amex') return parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msg.id);
-  return parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msg.id);
+  if (issuer === 'amex') return parseAmexEmail(fullText, fullTextLines, bodyOnly, dateHeader, issuerCards, msg.id);
+  return parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, msg.id);
+}
+
+/** Strip alert-threshold phrasings ("purchase over $X.XX",
+ *  "alert when over $X.XX") so they don't get extracted as the
+ *  real charge amount. Returns the input with those snippets blanked. */
+function stripAlertThresholds(text) {
+  return text
+    .replace(/\bover\s+\$\s*[\d,]+\.\d{2}/gi, '[ALERT]')
+    .replace(/\babove\s+\$\s*[\d,]+\.\d{2}/gi, '[ALERT]')
+    .replace(/\balert\s+(?:when|on|for|amount).{0,40}\$\s*[\d,]+\.\d{2}/gi, '[ALERT]');
 }
 
 function decodeBase64(data) {
   try { return atob(data.replace(/-/g, '+').replace(/_/g, '/')); } catch(e) { return ''; }
 }
 
-function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId) {
+function parseAmexEmail(fullText, fullTextLines, bodyOnly, dateHeader, issuerCards, msgId) {
   // Skip payment confirmation emails
   if (/payment\s*(received|confirmed|processed|posted)|thank\s*you\s*for\s*your\s*payment/i.test(fullText)) return null;
   // Skip scheduled/upcoming transaction heads-up emails — these are not real charges yet,
@@ -5877,11 +5901,15 @@ function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId)
   // count as spending. The actual charge, if any, comes through as a separate email later.
   if (/(your\s+)?upcoming\s+scheduled\s+transaction|scheduled\s+transaction\s+(is|has\s+been|will\s+be)|heads[\s-]up[:\s]|reminder[:\s].*payment|payment\s+scheduled/i.test(fullText)) return null;
 
-  const lines = fullTextLines.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  // Body-only line view — never includes the subject. This protects us
+  // from subjects like "Large Purchase Approved over $1.00" leaking into
+  // the per-line standalone-amount scan as a false positive.
+  const lines = bodyOnly.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
   // ── AMOUNT ──────────────────────────────────────
-  // Strip asterisks: "$10.96*" → "$10.96"
-  const cleanText = fullText.replace(/(\$[\d,]+\.\d{2})\s*\*/g, '$1');
+  // Strip asterisks: "$10.96*" → "$10.96", and blank out alert-threshold
+  // phrasings so "purchase over $1.00" doesn't outrank the real charge.
+  const cleanText = stripAlertThresholds(bodyOnly).replace(/(\$[\d,]+\.\d{2})\s*\*/g, '$1');
   let amount = null;
 
   // Check each line for a standalone dollar amount (Amex table format)
@@ -5894,7 +5922,7 @@ function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId)
     const m = cleanText.match(/\$\s*([\d,]+\.\d{2})\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i);
     if (m) amount = parseFloat(m[1].replace(/,/g, ''));
   }
-  // Fallback: any dollar amount
+  // Fallback: any dollar amount in the body
   if (!amount) {
     const m = cleanText.match(/\$\s*([\d,]+\.\d{2})/);
     if (m) amount = parseFloat(m[1].replace(/,/g, ''));
@@ -5965,11 +5993,17 @@ function parseAmexEmail(fullText, fullTextLines, dateHeader, issuerCards, msgId)
   };
 }
 
-function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
+function parseGenericEmail(fullText, bodyOnly, dateHeader, issuer, issuerCards, msgId) {
   // Skip payment confirmation emails
   if (/payment\s*(received|confirmed|processed|posted)|thank\s*you\s*for\s*your\s*payment/i.test(fullText)) return null;
   // Skip scheduled/upcoming transaction heads-up emails (not real charges)
   if (/(your\s+)?upcoming\s+scheduled\s+transaction|scheduled\s+transaction\s+(is|has\s+been|will\s+be)|heads[\s-]up[:\s]|reminder[:\s].*payment|payment\s+scheduled/i.test(fullText)) return null;
+
+  // Amount candidates come from the BODY only (no subject) and with
+  // alert-threshold phrasings stripped. Wells Fargo subjects like
+  // "You made a purchase over $1.00" are alert thresholds, not the
+  // actual charge; the real $35.96 always lives in the body.
+  const amountText = stripAlertThresholds(bodyOnly);
 
   let amount = null;
   let merchant = null;
@@ -5999,11 +6033,11 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   //          or purchase in the amount of $7.20 was placed or charged on your
   //          Platinum Card ending in 0444"
   if (issuer === 'capital-one') {
-    // Amount: "in the amount of $7.20"
-    const capAmt = fullText.match(/(?:in\s+the\s+amount\s+of|amount\s+of)\s*\$\s*([\d,]+\.\d{2})/i);
+    // Amount: "in the amount of $7.20" — search body only.
+    const capAmt = amountText.match(/(?:in\s+the\s+amount\s+of|amount\s+of)\s*\$\s*([\d,]+\.\d{2})/i);
     if (capAmt) amount = parseFloat(capAmt[1].replace(/,/g, ''));
-    // Fallback
-    if (!amount) { const m = fullText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
+    // Fallback: any $-amount in the body (subject excluded).
+    if (!amount) { const m = amountText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
 
     // Merchant: "at RAZ*FNP E Retail Priva, a pending" — lazy match up to ", a pending/purchase"
     const capMerch = fullText.match(/\bat\s+(.+?),\s+a\s+(?:pending|purchase)/i);
@@ -6025,9 +6059,15 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   //                    "Merchant detail  LYFT *TEMP AUTH HOLD in +1855..., CA, USA"
   else if (issuer === 'wells-fargo') {
     // Amount: labeled row "Amount  $44.94"
-    const wfAmt = fullText.match(/(?:^|\n)\s*Amount\s+\$?\s*([\d,]+\.\d{2})/im);
+    const wfAmt = amountText.match(/(?:^|\n)\s*Amount\s+\$?\s*([\d,]+\.\d{2})/im);
     if (wfAmt) amount = parseFloat(wfAmt[1].replace(/,/g, ''));
-    if (!amount) { const m = fullText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
+    // "purchase of $35.96" — preferred over a bare "$35.96" so we land on
+    // the real charge, not some footer snippet.
+    if (!amount) {
+      const m = amountText.match(/(?:purchase|charge|transaction)\s+(?:of|for)\s+\$\s*([\d,]+\.\d{2})/i);
+      if (m) amount = parseFloat(m[1].replace(/,/g, ''));
+    }
+    if (!amount) { const m = amountText.match(/\$\s*([\d,]+\.\d{2})/); if(m) amount = parseFloat(m[1].replace(/,/g,'')); }
 
     // Merchant: "Merchant detail  LYFT *TEMP AUTH HOLD in +1855..., CA, USA"
     // Use lookahead to stop at " in +digits" location suffix
@@ -6051,10 +6091,13 @@ function parseGenericEmail(fullText, dateHeader, issuer, issuerCards, msgId) {
   // ── GENERIC FALLBACK (Chase, Citi, Discover, US Bank, BofA) ──
   else {
     const amountPatterns = [
+      // Prefer "of/for $X" so an alert "purchase over $1" can't sneak
+      // through even if alert-threshold stripping ever fails.
+      /(?:amount|charge|purchase|spent|transaction)\s+(?:of|for)\s+\$?\s*([\d,]+\.\d{2})/i,
       /(?:amount|charge|purchase|spent|transaction)[^$\d]*\$?\s*([\d,]+\.\d{2})/i,
       /\$\s*([\d,]+\.\d{2})/,
     ];
-    for (const p of amountPatterns) { const m = fullText.match(p); if(m){amount=parseFloat(m[1].replace(/,/g,''));break;} }
+    for (const p of amountPatterns) { const m = amountText.match(p); if(m){amount=parseFloat(m[1].replace(/,/g,''));break;} }
 
     merchant = tryGenericMerchant();
 
