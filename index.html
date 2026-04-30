@@ -4754,6 +4754,7 @@ function loadFromStorage() {
       incomeEntries = d.incomeEntries || [];
       savingsGoals = d.savingsGoals || [];
       cardBalances = d.cardBalances || {};
+      scheduledMovements = d.scheduledMovements || [];
       nextIncomeId = d.nextIncomeId || 1;
       nextGoalId = d.nextGoalId || 1;
       prunePayments(); // drop logged payments older than 30d (except ones still needed for balance calc)
@@ -4796,6 +4797,7 @@ function saveToLocalStorage() {
       processedPaymentEmailIds: [...processedPaymentEmailIds],
       gmailUser, merchantRules, nightlySyncEnabled, yesterdayDismissed, yesterdayDismissedDate,
       cardPayments, incomeEntries, savingsGoals, cardBalances,
+      scheduledMovements,
       nextIncomeId, nextGoalId,
     }));
   } catch(e) {}
@@ -5164,17 +5166,30 @@ async function loadFromCloud() {
       note: i.note, frequency: i.frequency, recurring: !!i.recurring, payDay: i.pay_day || 0,
       destinationAccountId: i.destination_account_id || null,
     }));
-    scheduledMovements = (schedData || []).map(s => ({
-      id: s.id, kind: s.kind, label: s.label, note: s.note || null,
-      sourceAccountId: s.source_account_id || null,
-      targetAccountId: s.target_account_id || null,
-      cardId: s.card_id || null,
-      amount: Number(s.amount) || 0,
-      dayOfMonth: Number(s.day_of_month) || 1,
-      active: s.active !== false,
-      autoApply: !!s.auto_apply,
-      lastAppliedPeriod: s.last_applied_period || null,
-    }));
+    // Snapshot the local lastAppliedPeriod per id BEFORE we overwrite from
+    // cloud — the cloud copy may lag a 1.5s flush, and re-firing an auto-
+    // apply that local already executed this period would double-credit.
+    const localPeriods = new Map();
+    for (const s of (scheduledMovements || [])) {
+      if (s?.id && s.lastAppliedPeriod) localPeriods.set(s.id, s.lastAppliedPeriod);
+    }
+    scheduledMovements = (schedData || []).map(s => {
+      const cloudP = s.last_applied_period || null;
+      const localP = localPeriods.get(s.id) || null;
+      // Take the later of the two so we don't regress.
+      const merged = (cloudP && localP) ? (cloudP > localP ? cloudP : localP) : (cloudP || localP);
+      return {
+        id: s.id, kind: s.kind, label: s.label, note: s.note || null,
+        sourceAccountId: s.source_account_id || null,
+        targetAccountId: s.target_account_id || null,
+        cardId: s.card_id || null,
+        amount: Number(s.amount) || 0,
+        dayOfMonth: Number(s.day_of_month) || 1,
+        active: s.active !== false,
+        autoApply: !!s.auto_apply,
+        lastAppliedPeriod: merged,
+      };
+    });
     savingsGoals = (goalsData || []).map(g => ({
       id: g.id, name: g.name, target: Number(g.target),
       savedSoFar: Number(g.saved_so_far), deadline: g.deadline,
@@ -7369,7 +7384,19 @@ function saveIncome(){
   showSyncBar('success','💵',`Income of <strong>$${amount.toLocaleString()}</strong> logged`);
 }
 
-function deleteIncome(id){cloudDeletes.income_entries.push(id);incomeEntries=incomeEntries.filter(e=>e.id!==id);saveToStorage();renderFinanceHub();}
+function deleteIncome(id){
+  const removed = incomeEntries.find(e => e.id === id);
+  // Reverse the destination-account credit, but only for one-time entries
+  // (recurring entries don't credit on save — see saveIncome / applyOneSchedule).
+  if (removed?.destinationAccountId && removed.frequency === 'once') {
+    adjustAccountBalance(removed.destinationAccountId, -Number(removed.amount || 0));
+  }
+  cloudDeletes.income_entries.push(id);
+  incomeEntries = incomeEntries.filter(e => e.id !== id);
+  saveToStorage();
+  renderFinanceHub();
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
+}
 
 function getMonthIncome(year,month){
   const now=new Date();
@@ -7626,11 +7653,14 @@ function renderCashFlowCalendar(){
   CARDS.forEach(card=>{if(card.payDay)addEvent(card.payDay,'payment',card.name+' due',cardBalances[card.id]?.statementBalance||0);});
   getIncomeOccurrencesInMonth(year,month).forEach(e=>addEvent(e.day,'income',e.label,e.amount));
   // Scheduled movements — show on their day_of_month, mapped to cf-event types.
+  // Clamp dayOfMonth into the visible month (rent on the 31st should still
+  // surface on Feb 28/29) — matches the auto-apply runner's clamping.
   (scheduledMovements||[]).filter(s=>s.active).forEach(s=>{
     const evType = s.kind === 'income' ? 'income'
                  : s.kind === 'card_payment' ? 'payment'
                  : 'sub'; // outflow / transfer surface as the neutral 'sub' style
-    addEvent(s.dayOfMonth || 1, evType, s.label, s.amount);
+    const day = Math.min(s.dayOfMonth || 1, daysInMonth);
+    addEvent(day, evType, s.label, s.amount);
   });
 
   // Tight days: only UPCOMING days (today or future in current month, all days in future months)
@@ -7994,10 +8024,16 @@ function deletePayment(cardId, pDate, pAmount) {
     if (idx !== -1) {
       const removed = cardPayments[cardId][idx];
       if (removed?.id) cloudDeletes.card_payments.push(removed.id);
+      // Reverse the source-account deduction so the balance doesn't drift
+      // when a payment is deleted after it was logged.
+      if (removed?.sourceAccountId) {
+        adjustAccountBalance(removed.sourceAccountId, +Number(removed.amount || 0));
+      }
       cardPayments[cardId].splice(idx, 1);
     }
     saveToStorage();
     renderPaymentsPage();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
     showSyncBar('success', '🗑️', 'Payment removed');
   }
 }
@@ -9495,15 +9531,20 @@ function applyAutoSchedules() {
     new Intl.DateTimeFormat('en-CA', { day: 'numeric', timeZone: 'America/Los_Angeles' }).format(now),
     10,
   );
+  // Days in the current Pacific-time month — used to clamp dayOfMonth=31
+  // schedules into shorter months (Feb 28/29, Apr 30, etc.) so they still
+  // fire on the last day instead of being silently skipped.
+  const daysInThisMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
 
   let appliedCount = 0;
   for (const s of scheduledMovements) {
     if (!s.active || !s.autoApply) continue;
-    if (todayDay < (s.dayOfMonth || 1)) continue;
+    const effectiveDay = Math.min(s.dayOfMonth || 1, daysInThisMonth);
+    if (todayDay < effectiveDay) continue;
     if (s.lastAppliedPeriod && s.lastAppliedPeriod >= periodKey) continue;
 
     try {
-      applyOneSchedule(s, periodKey);
+      applyOneSchedule(s, periodKey, effectiveDay);
       s.lastAppliedPeriod = periodKey;
       appliedCount++;
     } catch (e) {
@@ -9517,8 +9558,9 @@ function applyAutoSchedules() {
   }
 }
 
-function applyOneSchedule(s, periodKey) {
-  const dateStr = `${periodKey}-${String(s.dayOfMonth).padStart(2, '0')}`;
+function applyOneSchedule(s, periodKey, effectiveDay) {
+  const day = effectiveDay || s.dayOfMonth || 1;
+  const dateStr = `${periodKey}-${String(day).padStart(2, '0')}`;
   if (s.kind === 'transfer') {
     if (s.sourceAccountId) adjustAccountBalance(s.sourceAccountId, -s.amount);
     if (s.targetAccountId) adjustAccountBalance(s.targetAccountId, +s.amount);
