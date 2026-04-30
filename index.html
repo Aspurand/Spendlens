@@ -4281,9 +4281,28 @@ select.form-input {
       </div>
     </div>
     <div class="form-group"><label class="form-label">Label</label><input type="text" class="form-input" id="schedLabel" placeholder="e.g., Rent, Move to HYS"></div>
+    <div class="form-group">
+      <label class="form-label">Cadence</label>
+      <div class="card-select-group">
+        <button class="card-select-btn selected" id="schedFreqMonthly" onclick="selectScheduleFrequency('monthly')">📅 Monthly</button>
+        <button class="card-select-btn" id="schedFreqWeekly" onclick="selectScheduleFrequency('weekly')">🔁 Weekly</button>
+      </div>
+    </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="schedAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
-      <div class="form-group"><label class="form-label">Day of Month</label><input type="number" class="form-input" id="schedDay" min="1" max="31" placeholder="1" inputmode="numeric"></div>
+      <div class="form-group" id="schedDayMonthGroup"><label class="form-label">Day of Month</label><input type="number" class="form-input" id="schedDay" min="1" max="31" placeholder="1" inputmode="numeric"></div>
+      <div class="form-group" id="schedDayWeekGroup" style="display:none">
+        <label class="form-label">Day of Week</label>
+        <select class="form-input" id="schedDayWeek">
+          <option value="0">Sunday</option>
+          <option value="1">Monday</option>
+          <option value="2">Tuesday</option>
+          <option value="3">Wednesday</option>
+          <option value="4" selected>Thursday</option>
+          <option value="5">Friday</option>
+          <option value="6">Saturday</option>
+        </select>
+      </div>
     </div>
     <div class="form-group" id="schedSourceGroup">
       <label class="form-label">From Account</label>
@@ -5198,6 +5217,11 @@ async function loadFromCloud() {
         cardId: s.card_id || null,
         amount: Number(s.amount) || 0,
         dayOfMonth: Number(s.day_of_month) || 1,
+        // 'monthly' | 'weekly'. Older rows pre-migration come back as
+        // null; default to 'monthly' to preserve their behaviour.
+        frequency: s.frequency || 'monthly',
+        // 0=Sun … 6=Sat (matches JS Date.getDay()). Null for monthly rows.
+        dayOfWeek: s.day_of_week == null ? null : Number(s.day_of_week),
         active: s.active !== false,
         autoApply: !!s.auto_apply,
         lastAppliedPeriod: merged,
@@ -5470,6 +5494,8 @@ async function flushToCloud() {
     card_id: s.cardId || null,
     amount: Number(s.amount) || 0,
     day_of_month: Number(s.dayOfMonth) || 1,
+    frequency: s.frequency || 'monthly',
+    day_of_week: s.dayOfWeek == null ? null : Number(s.dayOfWeek),
     active: s.active !== false,
     auto_apply: !!s.autoApply,
     last_applied_period: s.lastAppliedPeriod || null,
@@ -7838,15 +7864,25 @@ function renderCashFlowCalendar(){
   subscriptions.filter(s=>s.active).forEach(s=>{const day=s.debitDay||1;addEvent(day,'sub',s.name,s.amount);});
   CARDS.forEach(card=>{if(card.payDay)addEvent(card.payDay,'payment',card.name+' due',cardBalances[card.id]?.statementBalance||0);});
   getIncomeOccurrencesInMonth(year,month).forEach(e=>addEvent(e.day,'income',e.label,e.amount));
-  // Scheduled movements — show on their day_of_month, mapped to cf-event types.
-  // Clamp dayOfMonth into the visible month (rent on the 31st should still
-  // surface on Feb 28/29) — matches the auto-apply runner's clamping.
+  // Scheduled movements — surface on the visible month.
+  // Monthly: clamp dayOfMonth into this month (rent on the 31st should
+  // still surface on Feb 28/29) — matches the auto-apply runner.
+  // Weekly: emit one event for every matching day-of-week in the month.
   (scheduledMovements||[]).filter(s=>s.active).forEach(s=>{
     const evType = s.kind === 'income' ? 'income'
                  : s.kind === 'card_payment' ? 'payment'
                  : 'sub'; // outflow / transfer surface as the neutral 'sub' style
-    const day = Math.min(s.dayOfMonth || 1, daysInMonth);
-    addEvent(day, evType, s.label, s.amount);
+    if ((s.frequency || 'monthly') === 'weekly') {
+      const targetDow = (s.dayOfWeek == null) ? 4 : Number(s.dayOfWeek);
+      for (let day = 1; day <= daysInMonth; day++) {
+        if (new Date(year, month, day).getDay() === targetDow) {
+          addEvent(day, evType, s.label, s.amount);
+        }
+      }
+    } else {
+      const day = Math.min(s.dayOfMonth || 1, daysInMonth);
+      addEvent(day, evType, s.label, s.amount);
+    }
   });
 
   // Tight days: only UPCOMING days (today or future in current month, all days in future months)
@@ -9460,6 +9496,42 @@ function adjustAccountBalance(accountId, delta) {
   renderCashTile();
 }
 
+/** Project the user's cash on hand 3 months out, based on the average
+ *  monthly net (income − expenses) across the last 3 completed months.
+ *  Returns null when we lack enough signal to project. */
+function projectCashTrend() {
+  const accounts = getCashAccounts();
+  if (accounts.length === 0) return null;
+  const currentCash = totalCashOnHand();
+
+  const now = new Date();
+  // Pacific-time anchor for "this month" so the trend window matches
+  // every other month-aware piece of the app.
+  const ptYear = parseInt(new Intl.DateTimeFormat('en-CA', { year: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10);
+  const ptMonthIdx = parseInt(new Intl.DateTimeFormat('en-CA', { month: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10) - 1;
+
+  // Walk the last 3 *completed* months (not including the in-progress one).
+  const nets = [];
+  for (let i = 1; i <= 3; i++) {
+    let m = ptMonthIdx - i;
+    let y = ptYear;
+    while (m < 0) { m += 12; y -= 1; }
+    const incomeM = (typeof getMonthIncome === 'function') ? getMonthIncome(y, m) : 0;
+    const txs = (typeof getMonthTransactions === 'function') ? getMonthTransactions(y, m, 'all') : [];
+    const expensesM = txs.reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
+    nets.push(incomeM - expensesM);
+  }
+  if (nets.length === 0) return null;
+
+  const avgMonthlyNet = nets.reduce((s, n) => s + n, 0) / nets.length;
+  const projected3mo = currentCash + (avgMonthlyNet * 3);
+  const delta = projected3mo - currentCash;
+  // Pct only meaningful when there's a base to compare against.
+  const pctChange = currentCash > 0 ? (delta / currentCash) * 100 : null;
+
+  return { avgMonthlyNet, projected3mo, currentCash, delta, pctChange };
+}
+
 // ─── Cash on Hand tile (Dashboard) ─────────────────────────────────────
 function renderCashTile() {
   const tile = document.getElementById('cashTile');
@@ -9467,13 +9539,30 @@ function renderCashTile() {
   const accounts = getCashAccounts();
   if (accounts.length === 0) { tile.style.display = 'none'; return; }
   const total = totalCashOnHand();
+  const trend = projectCashTrend();
+
+  // Build the trend line. Hide when there's no signal (avg net ≈ 0
+  // means flat — projection equals current cash, nothing to surface).
+  let trendHTML = `<div class="cash-tile-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>`;
+  if (trend && Math.abs(trend.delta) >= 1) {
+    const up = trend.delta >= 0;
+    const color = up ? 'var(--green)' : 'var(--red)';
+    const sign = up ? '+' : '−';
+    const dollars = '$' + Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const pct = (trend.pctChange == null) ? '' :
+      `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% `;
+    trendHTML += `<div class="cash-tile-sub" style="margin-top:2px">
+      <span style="color:${color};font-weight:600">${pct}(${sign}${dollars})</span> projected · 3 mo
+    </div>`;
+  }
+
   tile.style.display = '';
   tile.innerHTML = `
     <div class="cash-tile-icon">🏦</div>
     <div class="cash-tile-body">
       <div class="cash-tile-label">Cash on hand</div>
       <div class="cash-tile-value">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-      <div class="cash-tile-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
+      ${trendHTML}
     </div>
     <svg class="cash-tile-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
   `;
@@ -9542,19 +9631,23 @@ function renderAccountsPage() {
 function renderScheduleRow(s) {
   const KIND_ICON = { transfer: '🔁', outflow: '💸', card_payment: '💳', income: '💵' };
   const KIND_LABEL = { transfer: 'Transfer', outflow: 'Outflow', card_payment: 'Card Pay', income: 'Income' };
+  const DOW_LABEL = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
   const accountName = (id) => (CARDS.find(c => c.id === id)?.name) || '—';
   let tail = '';
   if (s.kind === 'transfer')      tail = `${accountName(s.sourceAccountId)} → ${accountName(s.targetAccountId)}`;
   else if (s.kind === 'outflow')      tail = `From ${accountName(s.sourceAccountId)}`;
   else if (s.kind === 'card_payment') tail = `${accountName(s.sourceAccountId)} → ${accountName(s.cardId)}`;
   else                                tail = `Into ${accountName(s.targetAccountId)}`;
+  const cadence = (s.frequency || 'monthly') === 'weekly'
+    ? `Every ${DOW_LABEL[(s.dayOfWeek == null ? 4 : s.dayOfWeek)] || 'week'}`
+    : `Day ${s.dayOfMonth}`;
   const auto = s.autoApply ? `<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--green-soft);color:var(--green);padding:2px 6px;border-radius:4px;margin-left:6px">AUTO</span>` : '';
   const inactive = !s.active ? `<span style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--bg-elev,var(--bg-card-hover));color:var(--text-muted);padding:2px 6px;border-radius:4px;margin-left:6px">PAUSED</span>` : '';
   return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px">
     <div style="font-size:22px;flex-shrink:0">${KIND_ICON[s.kind] || '·'}</div>
     <div style="flex:1;min-width:0">
       <div style="font-weight:600;font-size:14px">${s.label}${auto}${inactive}</div>
-      <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${KIND_LABEL[s.kind]} · Day ${s.dayOfMonth} · ${tail}</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${KIND_LABEL[s.kind]} · ${cadence} · ${tail}</div>
     </div>
     <div style="text-align:right">
       <div style="font-family:var(--font-mono);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums lining-nums">$${(s.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -9595,6 +9688,16 @@ function saveAccountBalance() {
 
 // ─── Schedule modal ───────────────────────────────────────────────────
 let scheduleKindCurrent = 'outflow';
+let scheduleFreqCurrent = 'monthly';
+
+function selectScheduleFrequency(freq) {
+  scheduleFreqCurrent = freq;
+  document.getElementById('schedFreqMonthly')?.classList.toggle('selected', freq === 'monthly');
+  document.getElementById('schedFreqWeekly')?.classList.toggle('selected', freq === 'weekly');
+  // Show day-of-month for monthly, day-of-week dropdown for weekly.
+  document.getElementById('schedDayMonthGroup').style.display = freq === 'monthly' ? '' : 'none';
+  document.getElementById('schedDayWeekGroup').style.display = freq === 'weekly' ? '' : 'none';
+}
 
 function openScheduleModal(id = null) {
   document.getElementById('scheduleModal').classList.add('open');
@@ -9614,9 +9717,11 @@ function openScheduleModal(id = null) {
     const s = scheduledMovements.find(x => x.id === id);
     if (s) {
       selectScheduleKind(s.kind);
+      selectScheduleFrequency(s.frequency || 'monthly');
       document.getElementById('schedLabel').value = s.label || '';
       document.getElementById('schedAmount').value = s.amount || '';
       document.getElementById('schedDay').value = s.dayOfMonth || '';
+      document.getElementById('schedDayWeek').value = String(s.dayOfWeek == null ? 4 : s.dayOfWeek);
       if (s.sourceAccountId) document.getElementById('schedSourceAccount').value = s.sourceAccountId;
       if (s.targetAccountId) document.getElementById('schedTargetAccount').value = s.targetAccountId;
       if (s.cardId)          document.getElementById('schedCardSelect').value = s.cardId;
@@ -9625,9 +9730,11 @@ function openScheduleModal(id = null) {
     }
   } else {
     selectScheduleKind('outflow');
+    selectScheduleFrequency('monthly');
     document.getElementById('schedLabel').value = '';
     document.getElementById('schedAmount').value = '';
     document.getElementById('schedDay').value = '';
+    document.getElementById('schedDayWeek').value = '4'; // Thursday default
     document.getElementById('schedNote').value = '';
     document.getElementById('schedAutoApply').checked = false;
   }
@@ -9655,9 +9762,11 @@ function selectScheduleKind(kind) {
 function saveSchedule() {
   const editId = document.getElementById('schedEditId').value || null;
   const kind = scheduleKindCurrent;
+  const frequency = scheduleFreqCurrent || 'monthly';
   const label = document.getElementById('schedLabel').value.trim();
   const amount = parseFloat(document.getElementById('schedAmount').value);
   const day = parseInt(document.getElementById('schedDay').value, 10);
+  const dayOfWeek = parseInt(document.getElementById('schedDayWeek').value, 10);
   const sourceAccountId = document.getElementById('schedSourceGroup').style.display !== 'none'
     ? (document.getElementById('schedSourceAccount').value || null) : null;
   const targetAccountId = document.getElementById('schedTargetGroup').style.display !== 'none'
@@ -9669,20 +9778,40 @@ function saveSchedule() {
 
   if (!label) { alert('Enter a label (e.g., Rent)'); return; }
   if (!Number.isFinite(amount) || amount <= 0) { alert('Enter a positive amount'); return; }
-  if (!Number.isFinite(day) || day < 1 || day > 31) { alert('Day must be 1–31'); return; }
+  if (frequency === 'monthly') {
+    if (!Number.isFinite(day) || day < 1 || day > 31) { alert('Day of month must be 1–31'); return; }
+  } else {
+    if (!Number.isFinite(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) { alert('Pick a day of the week'); return; }
+  }
   if (kind !== 'income'   && !sourceAccountId) { alert('Pick a source account'); return; }
   if (kind === 'transfer' && !targetAccountId) { alert('Pick a destination account'); return; }
   if (kind === 'income'   && !targetAccountId) { alert('Pick a destination account'); return; }
   if (kind === 'card_payment' && !cardId)      { alert('Pick a card'); return; }
 
+  // For weekly schedules we still store dayOfMonth (column is required)
+  // but it's ignored at apply-time. Default to 1 to keep the constraint
+  // happy on both old and new rows.
+  const monthDay = frequency === 'monthly' ? day : 1;
+  const weekDay  = frequency === 'weekly' ? dayOfWeek : null;
+
   if (editId) {
     const s = scheduledMovements.find(x => x.id === editId);
     if (s) {
-      Object.assign(s, { kind, label, amount, dayOfMonth: day, sourceAccountId, targetAccountId, cardId, note, autoApply });
+      // Reset lastAppliedPeriod when frequency switches — the period
+      // namespaces (m: vs w:) aren't comparable so a stale value would
+      // either over- or under-fire on the new cadence.
+      const freqChanged = (s.frequency || 'monthly') !== frequency;
+      Object.assign(s, {
+        kind, label, amount, frequency,
+        dayOfMonth: monthDay, dayOfWeek: weekDay,
+        sourceAccountId, targetAccountId, cardId, note, autoApply,
+        ...(freqChanged ? { lastAppliedPeriod: null } : {}),
+      });
     }
   } else {
     scheduledMovements.push({
-      id: crypto.randomUUID(), kind, label, amount, dayOfMonth: day,
+      id: crypto.randomUUID(), kind, label, amount, frequency,
+      dayOfMonth: monthDay, dayOfWeek: weekDay,
       sourceAccountId, targetAccountId, cardId, note,
       active: true, autoApply, lastAppliedPeriod: null,
     });
@@ -9710,9 +9839,9 @@ function deleteSchedule(id) {
 function applyAutoSchedules() {
   if (!scheduledMovements || scheduledMovements.length === 0) return;
   const now = new Date();
-  const periodKey = new Intl.DateTimeFormat('en-CA', {
+  const monthKey = 'm:' + new Intl.DateTimeFormat('en-CA', {
     year: 'numeric', month: '2-digit', timeZone: 'America/Los_Angeles',
-  }).format(now); // 'YYYY-MM'
+  }).format(now); // 'm:YYYY-MM'
   const todayDay = parseInt(
     new Intl.DateTimeFormat('en-CA', { day: 'numeric', timeZone: 'America/Los_Angeles' }).format(now),
     10,
@@ -9722,11 +9851,35 @@ function applyAutoSchedules() {
   // fire on the last day instead of being silently skipped.
   const daysInThisMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
 
+  // Day-of-week + week period key in Pacific time. The week key anchors
+  // to the most recent Sunday so all days Sun–Sat in the same week share
+  // the same key — fires once per week, not once per matching day.
+  const ptToday = new Date(ptDateStr() + 'T12:00:00');
+  const todayDow = ptToday.getDay(); // 0=Sun … 6=Sat
+  const weekAnchor = new Date(ptToday);
+  weekAnchor.setDate(weekAnchor.getDate() - todayDow);
+  const weekKey = 'w:' + ptDateStr(weekAnchor);
+
   let appliedCount = 0;
   for (const s of scheduledMovements) {
     if (!s.active || !s.autoApply) continue;
-    const effectiveDay = Math.min(s.dayOfMonth || 1, daysInThisMonth);
-    if (todayDay < effectiveDay) continue;
+    const freq = s.frequency || 'monthly';
+
+    let periodKey, effectiveDay;
+    if (freq === 'weekly') {
+      periodKey = weekKey;
+      const targetDow = (s.dayOfWeek == null) ? 4 : Number(s.dayOfWeek);
+      // Only fire on the configured day of the week (or later in the
+      // same week) — and the per-week dedupe stops a Friday-fire from
+      // re-running on Saturday.
+      if (todayDow < targetDow) continue;
+      effectiveDay = todayDay;
+    } else {
+      periodKey = monthKey;
+      effectiveDay = Math.min(s.dayOfMonth || 1, daysInThisMonth);
+      if (todayDay < effectiveDay) continue;
+    }
+
     if (s.lastAppliedPeriod && s.lastAppliedPeriod >= periodKey) continue;
 
     try {
@@ -9752,8 +9905,18 @@ function applyAutoSchedules() {
 }
 
 function applyOneSchedule(s, periodKey, effectiveDay) {
-  const day = effectiveDay || s.dayOfMonth || 1;
-  const dateStr = `${periodKey}-${String(day).padStart(2, '0')}`;
+  // Build a transaction date string for the ledger entry. Monthly: use
+  // the period's YYYY-MM + the (clamped) day. Weekly: the period key is
+  // already the Sunday-anchored YYYY-MM-DD; use today's PT date so the
+  // entry lands on the actual fire day.
+  let dateStr;
+  if ((s.frequency || 'monthly') === 'weekly') {
+    dateStr = ptDateStr();
+  } else {
+    const day = effectiveDay || s.dayOfMonth || 1;
+    const yyyymm = periodKey.replace(/^m:/, '');
+    dateStr = `${yyyymm}-${String(day).padStart(2, '0')}`;
+  }
   if (s.kind === 'transfer') {
     if (s.sourceAccountId) adjustAccountBalance(s.sourceAccountId, -s.amount);
     if (s.targetAccountId) adjustAccountBalance(s.targetAccountId, +s.amount);
