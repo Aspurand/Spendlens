@@ -926,38 +926,49 @@ body {
   margin-bottom: 16px;
   display: flex; gap: 12px; align-items: flex-start;
 }
-.cash-tile {
+/* Two side-by-side stationary cards (Balance + Projected) replacing
+   the single cash-tile row. Tap either to navigate to Accounts. */
+.cash-cards-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cash-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px 16px;
-  margin-bottom: 14px;
-  display: flex; align-items: center; gap: 12px;
+  padding: 14px;
   cursor: pointer;
   transition: background 0.15s, transform 0.15s;
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0;
 }
-.cash-tile:hover { background: var(--bg-card-hover); transform: translateY(-1px); }
-.cash-tile-icon {
-  width: 38px; height: 38px; border-radius: 10px;
-  background: var(--green-soft); color: var(--green);
+.cash-card:hover { background: var(--bg-card-hover); transform: translateY(-1px); }
+.cash-card-head { display: flex; align-items: center; gap: 8px; }
+.cash-card-icon {
+  width: 28px; height: 28px; border-radius: 8px;
   display: grid; place-items: center;
-  font-size: 18px; flex-shrink: 0;
+  font-size: 14px; flex-shrink: 0;
 }
-.cash-tile-body { flex: 1; min-width: 0; }
-.cash-tile-label {
-  font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
+.cash-card-icon.balance   { background: var(--green-soft); color: var(--green); }
+.cash-card-icon.projected { background: var(--accent-soft); color: var(--accent); }
+.cash-card-icon.projected-down { background: var(--red-soft); color: var(--red); }
+.cash-card-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
   text-transform: uppercase; color: var(--text-muted);
 }
-.cash-tile-value {
+.cash-card-value {
   font-family: var(--font-mono);
   font-size: 22px; font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--text);
   font-variant-numeric: tabular-nums lining-nums;
-  margin-top: 2px;
+  margin-top: 4px;
+  line-height: 1.1;
 }
-.cash-tile-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-.cash-tile-arrow { color: var(--text-muted); flex-shrink: 0; }
+.cash-card-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; line-height: 1.3; }
+.cash-card-sub-tiny { font-size: 10px; color: var(--text-muted); margin-top: 2px; line-height: 1.3; opacity: 0.85; }
 .gmail-cta-icon { font-size: 22px; flex-shrink: 0; }
 .gmail-cta-title {
   font-family: var(--font-serif);
@@ -3692,8 +3703,11 @@ select.form-input {
     </div>
   </div>
 
-  <!-- ═══ CASH ON HAND tile (visible only when at least one bank/debit account exists) ═══ -->
-  <div id="cashTile" class="cash-tile" style="display:none" onclick="navTo('pageAccounts')"></div>
+  <!-- ═══ CASH ROW: Balance + Projected (visible only when at least one bank/debit account exists) ═══ -->
+  <div id="cashCardsRow" class="cash-cards-row" style="display:none">
+    <div id="cashCardBalance" class="cash-card" onclick="navTo('pageAccounts')"></div>
+    <div id="cashCardProjected" class="cash-card" onclick="navTo('pageAccounts')"></div>
+  </div>
 
   <!-- ═══ HEADER: eyebrow date + status pill ═══ -->
   <div class="bold-head">
@@ -9563,15 +9577,17 @@ function projectCashTrend() {
   const ptYear = parseInt(new Intl.DateTimeFormat('en-CA', { year: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10);
   const ptMonthIdx = parseInt(new Intl.DateTimeFormat('en-CA', { month: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10) - 1;
 
-  // 1) Average monthly expenses across the last 3 completed months —
-  //    but only count months that actually have transaction data. A
-  //    user who's only been logging for a month otherwise gets their
-  //    real expense rate divided by 3 (because we'd average $1700
-  //    over 3 months including 2 empty ones), under-projecting future
-  //    spend by 3×.
+  // 1) Average monthly expenses, sampling the LAST UP-TO-3 NON-EMPTY
+  //    completed months. Walk back up to a year if needed; skip months
+  //    with no transaction data so an empty stretch (new install,
+  //    travel month, etc.) doesn't dilute the average. Stop as soon
+  //    as we have 3 valid months — closer to the user's mental model
+  //    of "my recent expense rate" than a fixed 3-month window.
   let expensesSum = 0;
   let nMonths = 0;
-  for (let i = 1; i <= 3; i++) {
+  const targetValidMonths = 3;
+  const lookbackLimit = 12;
+  for (let i = 1; i <= lookbackLimit && nMonths < targetValidMonths; i++) {
     let m = ptMonthIdx - i;
     let y = ptYear;
     while (m < 0) { m += 12; y -= 1; }
@@ -9606,55 +9622,70 @@ function projectCashTrend() {
     avgMonthlyNet: (forwardIncome / 3) - avgMonthlyExpense + (scheduledNet / 3),
     projected3mo, currentCash, delta, pctChange,
     forwardIncome, avgMonthlyExpense, scheduledNet,
+    expenseMonthsSampled: nMonths,
   };
 }
 
-// ─── Cash on Hand tile (Dashboard) ─────────────────────────────────────
+// ─── Cash cards row (Dashboard) ───────────────────────────────────────
+// Two stationary cards: current Balance + 3-month Projected. Both tap
+// through to the Accounts page; the projected card shows the
+// breakdown so a misconfigured schedule is diagnosable in one glance.
 function renderCashTile() {
-  const tile = document.getElementById('cashTile');
-  if (!tile) return;
+  const row = document.getElementById('cashCardsRow');
+  const balanceCard = document.getElementById('cashCardBalance');
+  const projectedCard = document.getElementById('cashCardProjected');
+  if (!row || !balanceCard || !projectedCard) return;
+
   const accounts = getCashAccounts();
-  if (accounts.length === 0) { tile.style.display = 'none'; return; }
+  if (accounts.length === 0) { row.style.display = 'none'; return; }
+  row.style.display = '';
+
   const total = totalCashOnHand();
   const trend = projectCashTrend();
 
-  // Build the trend line. Hide when there's no signal (avg net ≈ 0
-  // means flat — projection equals current cash, nothing to surface).
-  let trendHTML = `<div class="cash-tile-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>`;
-  if (trend && Math.abs(trend.delta) >= 1) {
-    const up = trend.delta >= 0;
-    const color = up ? 'var(--green)' : 'var(--red)';
-    const sign = up ? '+' : '−';
-    const dollars = '$' + Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 });
-    const pct = (trend.pctChange == null) ? '' :
-      `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% `;
-    trendHTML += `<div class="cash-tile-sub" style="margin-top:2px">
-      <span style="color:${color};font-weight:600">${pct}(${sign}${dollars})</span> projected · 3 mo
-    </div>`;
-    // Breakdown line — surfaces what went into the projection so a
-    // double-count (e.g. scheduled "income" that overlaps with a
-    // recurring incomeEntries paycheck) is visible at a glance.
-    const fmtAmt = (n) => '$' + Math.abs(Math.round(n)).toLocaleString('en-US');
-    const incomeStr = `+${fmtAmt(trend.forwardIncome)} in`;
-    const expenseStr = `−${fmtAmt(trend.avgMonthlyExpense * 3)} out`;
-    const schedStr = trend.scheduledNet === 0
-      ? null
-      : `${trend.scheduledNet >= 0 ? '+' : '−'}${fmtAmt(trend.scheduledNet)} sched`;
-    trendHTML += `<div class="cash-tile-sub" style="margin-top:2px;font-size:10.5px;opacity:0.8">
-      ${[incomeStr, expenseStr, schedStr].filter(Boolean).join(' · ')}
-    </div>`;
-  }
-
-  tile.style.display = '';
-  tile.innerHTML = `
-    <div class="cash-tile-icon">🏦</div>
-    <div class="cash-tile-body">
-      <div class="cash-tile-label">Cash on hand</div>
-      <div class="cash-tile-value">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-      ${trendHTML}
+  // ── Balance card ──
+  balanceCard.innerHTML = `
+    <div class="cash-card-head">
+      <div class="cash-card-icon balance">🏦</div>
+      <div class="cash-card-label">Cash on Hand</div>
     </div>
-    <svg class="cash-tile-arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
+    <div class="cash-card-value">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+    <div class="cash-card-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
   `;
+
+  // ── Projected card ──
+  if (!trend || Math.abs(trend.delta) < 1) {
+    projectedCard.innerHTML = `
+      <div class="cash-card-head">
+        <div class="cash-card-icon projected">📈</div>
+        <div class="cash-card-label">Projected · 3 mo</div>
+      </div>
+      <div class="cash-card-value" style="color:var(--text-muted)">—</div>
+      <div class="cash-card-sub">Add income & log expenses to project</div>
+    `;
+  } else {
+    const up = trend.delta >= 0;
+    const valueColor = up ? 'var(--green)' : 'var(--red)';
+    const sign = up ? '+' : '−';
+    const pctText = (trend.pctChange == null)
+      ? `${sign}$${Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
+      : `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% (${sign}$${Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 })})`;
+    const fmtAmt = (n) => '$' + Math.abs(Math.round(n)).toLocaleString('en-US');
+    const breakdownParts = [
+      `+${fmtAmt(trend.forwardIncome)} in`,
+      `−${fmtAmt(trend.avgMonthlyExpense * 3)} out`,
+      ...(trend.scheduledNet === 0 ? [] : [`${trend.scheduledNet >= 0 ? '+' : '−'}${fmtAmt(trend.scheduledNet)} sched`]),
+    ];
+    projectedCard.innerHTML = `
+      <div class="cash-card-head">
+        <div class="cash-card-icon ${up ? 'projected' : 'projected-down'}">${up ? '📈' : '📉'}</div>
+        <div class="cash-card-label">Projected · 3 mo</div>
+      </div>
+      <div class="cash-card-value">$${trend.projected3mo.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+      <div class="cash-card-sub" style="color:${valueColor};font-weight:600">${pctText}</div>
+      <div class="cash-card-sub-tiny">${breakdownParts.join(' · ')}</div>
+    `;
+  }
 }
 
 // ─── Accounts page renderer ────────────────────────────────────────────
@@ -10002,6 +10033,11 @@ function applyAutoSchedules() {
     // local-period merge in loadFromCloud helps, but only if the local
     // copy survives. scheduleFlush(0) closes that race.
     if (typeof scheduleFlush === 'function') scheduleFlush(0);
+    // Refresh the dashboard so newly-credited balances and the cash
+    // cards reflect the auto-applied movements without the user having
+    // to navigate away and back. (renderAll itself calls renderCashTile.)
+    if (typeof renderAll === 'function') renderAll();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
     showSyncBar('success', '⚙️', `Auto-applied <strong>${appliedCount}</strong> scheduled item${appliedCount === 1 ? '' : 's'}`);
   }
 }
