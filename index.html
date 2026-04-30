@@ -3888,6 +3888,11 @@ select.form-input {
     <div><div class="setting-label">Force Re-scan Gmail</div><div class="setting-desc">Clear processed-email cache and pull last 30 days again</div></div>
     <div class="setting-arrow">›</div>
   </div>
+  <div class="setting-item" onclick="document.getElementById('statementUploadInput').click()">
+    <div><div class="setting-label">Upload Statement</div><div class="setting-desc">CSV or PDF · cross-references and only adds missed charges</div></div>
+    <div class="setting-arrow">›</div>
+    <input type="file" id="statementUploadInput" multiple accept=".csv,.pdf,application/pdf,text/csv" style="display:none" onchange="handleStatementUpload(event.target.files); event.target.value=''">
+  </div>
   <div class="setting-item" onclick="clearAllData()">
     <div><div class="setting-label" style="color:var(--red)">Clear All Data</div><div class="setting-desc">Remove all transactions</div></div>
     <div class="setting-arrow">›</div>
@@ -4278,6 +4283,22 @@ select.form-input {
     <div class="form-group"><label class="form-label">Current Balance ($)</label><input type="number" class="form-input" id="setAccountBalanceAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
     <input type="hidden" id="setAccountBalanceId">
     <button class="submit-btn" onclick="saveAccountBalance()">Save Balance</button>
+  </div>
+</div>
+
+<!-- Statement upload preview -->
+<div class="modal-overlay" id="statementPreviewModal" onclick="if(event.target===this)closeModal('statementPreviewModal')">
+  <div class="modal" style="max-width:560px;max-height:88vh;overflow-y:auto">
+    <div class="modal-top">
+      <h2 id="statementPreviewTitle">Statement Preview</h2>
+      <button class="modal-close" onclick="closeModal('statementPreviewModal')">✕</button>
+    </div>
+    <div id="statementPreviewSummary" style="font-size:13px;color:var(--text-dim);margin-bottom:12px;line-height:1.5"></div>
+    <div id="statementPreviewList" style="margin:6px 0 14px"></div>
+    <div style="display:flex;gap:8px">
+      <button class="submit-btn" id="statementPreviewImportBtn" onclick="confirmStatementImport()" style="flex:1">Import Selected</button>
+      <button class="submit-btn" onclick="closeModal('statementPreviewModal')" style="flex:0;background:transparent;color:var(--text-dim);border:1px solid var(--border-strong);min-width:100px">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -10084,6 +10105,413 @@ function applyOneSchedule(s, periodKey, effectiveDay) {
       destinationAccountId: s.targetAccountId,
     });
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// STATEMENT PARSER — CSV + PDF
+// End-of-month reconciliation: upload statements, parse charge rows, and
+// strict-match against existing transactions. Only un-matched rows get
+// imported, behind a confirmation modal — false-positives would erode
+// trust faster than missed rows, so the bias is on missing > extra.
+// ════════════════════════════════════════════════════════════════════════
+
+// Lazy-load Mozilla's pdf.js — only when the user actually uploads a
+// PDF, so users who never use this feature don't pay the bundle cost.
+let _pdfjsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsPromise) return _pdfjsPromise;
+  _pdfjsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = () => {
+      if (!window.pdfjsLib) { reject(new Error('pdf.js failed to expose pdfjsLib')); return; }
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve(window.pdfjsLib);
+    };
+    script.onerror = () => reject(new Error('Failed to load pdf.js from CDN'));
+    document.head.appendChild(script);
+  });
+  return _pdfjsPromise;
+}
+
+async function extractPdfText(file) {
+  const lib = await loadPdfJs();
+  const buffer = await file.arrayBuffer();
+  const pdf = await lib.getDocument({ data: buffer }).promise;
+  const lines = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    // Group items by approximate Y position so we recover line breaks
+    // — pdf.js returns each text span with its transform matrix; the
+    // y-coordinate (transform[5]) tells us which row it's on. Items
+    // with the same y belong to the same visual line.
+    const rows = new Map();
+    for (const item of content.items) {
+      const y = Math.round(item.transform[5]);
+      if (!rows.has(y)) rows.set(y, []);
+      rows.get(y).push({ x: item.transform[4], str: item.str });
+    }
+    // Sort y descending (PDF y-axis runs from bottom up so higher y =
+    // higher on page) and then x ascending within each line.
+    const orderedY = [...rows.keys()].sort((a, b) => b - a);
+    for (const y of orderedY) {
+      const line = rows.get(y).sort((a, b) => a.x - b.x).map(s => s.str).join(' ').replace(/\s{2,}/g, ' ').trim();
+      if (line) lines.push(line);
+    }
+  }
+  return lines.join('\n');
+}
+
+/** Best-effort CSV row split — handles quoted fields with embedded commas. */
+function csvSplit(line) {
+  const out = [];
+  let buf = '', q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (q && line[i + 1] === '"') { buf += '"'; i++; }
+      else q = !q;
+    } else if (c === ',' && !q) {
+      out.push(buf); buf = '';
+    } else {
+      buf += c;
+    }
+  }
+  out.push(buf);
+  return out.map(s => s.trim());
+}
+
+/** Parse "MM/DD/YYYY", "MM-DD-YYYY", "MM/DD/YY", "YYYY-MM-DD" → ISO. */
+function parseStatementDate(s) {
+  if (!s) return null;
+  s = s.trim();
+  // YYYY-MM-DD already
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  // MM/DD/YYYY or MM-DD-YYYY
+  m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+  if (m) {
+    let y = m[3];
+    if (y.length === 2) y = (parseInt(y, 10) > 70 ? '19' : '20') + y;
+    return `${y}-${String(m[1]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
+  }
+  // "MM/DD" without year — assume current year (statement context)
+  m = s.match(/^(\d{1,2})[\/-](\d{1,2})$/);
+  if (m) {
+    const y = new Date().getFullYear();
+    return `${y}-${String(m[1]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+/** Reject lines that are summary / metadata, not real transactions. */
+const SUMMARY_LINE_RE = /\b(?:available\s+balance|credit\s+limit|previous\s+balance|new\s+balance|payment\s+due|minimum\s+(?:due|payment)|total\s+balance|cash\s+advance|total\s+credits?|total\s+debits?|account\s+summary|statement\s+balance|finance\s+charge|annual\s+(?:fee|percentage))\b/i;
+function isSummaryContext(text) {
+  return SUMMARY_LINE_RE.test(text);
+}
+
+/** Reject obviously non-charge lines (refunds / payments / credits). */
+function isPaymentOrCredit(desc, signedAmount) {
+  if (signedAmount > 0) return true; // credits commonly appear positive
+  if (/\b(?:payment\s+(?:thank|received|posted)|payment\s*-\s*thank|autopay|direct\s+payment|refund|credit\s+adjustment|reversal|return)\b/i.test(desc)) return true;
+  return false;
+}
+
+/** Normalize merchant for matching (uppercase, strip noise / suffixes). */
+function normalizeMerchantStrict(m) {
+  return (m || '').toUpperCase()
+    .replace(/[*#]+/g, ' ')
+    .replace(/\s+(?:LLC|INC|CORP|LTD|CO\.?)\b\.?/g, '')
+    .replace(/\s+IN\s+[A-Z][A-Z\s]+(?:,\s*[A-Z]{2}(?:,\s*USA)?)?$/, '')
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/** STRICT match: same date, same amount (≤1¢), same card last4 if both
+ *  sides have one, and merchant strings either equal after normalization
+ *  or one contains the other (≥3 chars). One mismatch on any axis ⇒ no
+ *  match ⇒ candidate gets imported as new. Bias: missing > extra. */
+function isStatementStrictMatch(parsed, existing) {
+  if (parsed.date !== existing.date) return false;
+  if (Math.abs(Number(parsed.amount) - Number(existing.amount)) > 0.01) return false;
+  // Card last4: only enforce when we know both sides.
+  if (parsed.last4 && existing.card) {
+    const card = CARDS.find(c => c.id === existing.card);
+    if (card?.last4 && card.last4 !== parsed.last4) return false;
+  }
+  const a = normalizeMerchantStrict(parsed.merchant);
+  const b = normalizeMerchantStrict(existing.merchant);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a))) return true;
+  return false;
+}
+
+// ─── CSV statement parser ──────────────────────────────────────────────
+function parseCSVStatement(csvText) {
+  const lines = csvText.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (lines.length < 2) return [];
+  const header = csvSplit(lines[0]).map(h => h.toLowerCase());
+
+  // Find columns. Some banks have separate Debit / Credit columns; others
+  // use a single signed Amount. We probe both layouts.
+  const findIdx = (re) => header.findIndex(h => re.test(h));
+  const dateIdx = findIdx(/^(transaction\s*date|trans(?:action)?\s*date|date)$/) >= 0
+    ? findIdx(/^(transaction\s*date|trans(?:action)?\s*date|date)$/)
+    : findIdx(/date/);
+  const descIdx  = findIdx(/^(description|merchant|details|payee|memo|narrative)$/) >= 0
+    ? findIdx(/^(description|merchant|details|payee|memo|narrative)$/)
+    : findIdx(/description|merchant|details|payee|memo/);
+  const amountIdx = findIdx(/^amount$/);
+  const debitIdx  = findIdx(/^(debit|withdrawal|charges?|outflow)$/);
+  const creditIdx = findIdx(/^(credit|deposit|payment|inflow)$/);
+
+  if (dateIdx < 0 || descIdx < 0) return []; // can't make sense of the file
+
+  // First pass: collect signed amounts so we can detect the bank's
+  // sign convention.
+  const raw = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = csvSplit(lines[i]);
+    const dateStr = cells[dateIdx];
+    const desc = cells[descIdx];
+    if (!dateStr || !desc) continue;
+    const date = parseStatementDate(dateStr);
+    if (!date) continue;
+    let signedAmount = 0;
+    if (amountIdx >= 0) {
+      const v = parseFloat((cells[amountIdx] || '').replace(/[$,]/g, ''));
+      if (Number.isFinite(v)) signedAmount = v;
+    } else if (debitIdx >= 0 || creditIdx >= 0) {
+      const debit  = parseFloat((cells[debitIdx]  || '').replace(/[$,]/g, ''));
+      const credit = parseFloat((cells[creditIdx] || '').replace(/[$,]/g, ''));
+      if (Number.isFinite(debit) && debit > 0)  signedAmount = -Math.abs(debit);
+      else if (Number.isFinite(credit) && credit > 0) signedAmount = Math.abs(credit);
+    }
+    if (!signedAmount) continue;
+    raw.push({ date, desc, signedAmount });
+  }
+
+  // Detect convention: Amex / Capital One CSV typically use POSITIVE for
+  // debits and negative for credits. Most bank checking exports use the
+  // opposite. Use majority sign of non-zero rows as a heuristic.
+  let posCount = 0, negCount = 0;
+  for (const r of raw) { if (r.signedAmount > 0) posCount++; else if (r.signedAmount < 0) negCount++; }
+  // If there's a clear majority, that's the "debit" sign.
+  const positiveIsDebit = posCount > negCount;
+
+  const candidates = [];
+  for (const r of raw) {
+    if (isSummaryContext(r.desc)) continue;
+    if (isPaymentOrCredit(r.desc, positiveIsDebit ? -r.signedAmount : r.signedAmount)) continue;
+    const isDebit = positiveIsDebit ? r.signedAmount > 0 : r.signedAmount < 0;
+    if (!isDebit) continue;
+    const amount = Math.abs(r.signedAmount);
+    if (amount <= 0 || amount > 50000) continue; // statement summary rows tend to be huge
+    candidates.push({
+      date: r.date,
+      merchant: r.desc.trim().slice(0, 80),
+      amount,
+      last4: null,
+      source: 'statement',
+    });
+  }
+  return candidates;
+}
+
+// ─── PDF statement parser ──────────────────────────────────────────────
+function parsePdfStatement(text, hintIssuer) {
+  // Try a generic line-scan approach. A "transaction line" looks like:
+  //   <date> <description> ... <amount>
+  // We require:
+  //   * a recognizable date at or near the start
+  //   * a single $ amount near the end of the line
+  //   * none of the summary keywords anywhere on the line
+  const candidates = [];
+  const lines = text.split(/\r?\n/);
+  // Last4 hint from anywhere in the document — most issuers print
+  // "Account ending in XXXX" near the top of the PDF.
+  let last4 = null;
+  const last4Match = text.match(/(?:account|card)\s+(?:ending\s+in\s+|number[\s\S]*?\b)(\d{4})\b/i);
+  if (last4Match) last4 = last4Match[1];
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.length < 6) continue;
+    if (isSummaryContext(line)) continue;
+
+    // Date at start (allow leading bullet / page artifacts).
+    const dateAtStart = line.match(/^[^\d]{0,3}(\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/);
+    if (!dateAtStart) continue;
+    const date = parseStatementDate(dateAtStart[1]);
+    if (!date) continue;
+
+    // Amount at the end. Some PDFs render negatives as "-$10.00" or "($10.00)".
+    const amtMatch = line.match(/(-?\$?\s*\(?\$?[\d,]+\.\d{2}\)?)\s*(?:CR|DR)?\s*$/i);
+    if (!amtMatch) continue;
+    const amtRaw = amtMatch[1];
+    const negative = /^-/.test(amtRaw) || /^\(/.test(amtRaw);
+    const amount = parseFloat(amtRaw.replace(/[\$,()\s-]/g, ''));
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 50000) continue;
+
+    // Description = whatever's between the date and the amount.
+    const dateEnd = dateAtStart.index + dateAtStart[0].length;
+    const amtStart = line.lastIndexOf(amtMatch[1]);
+    const desc = line.slice(dateEnd, amtStart).trim();
+    if (!desc || desc.length < 2) continue;
+    if (isPaymentOrCredit(desc, negative ? -amount : amount)) continue;
+    if (negative) continue; // explicit credit; skip
+
+    candidates.push({
+      date,
+      merchant: desc.slice(0, 80),
+      amount,
+      last4,
+      source: 'statement',
+    });
+  }
+  return candidates;
+}
+
+// ─── Upload entrypoint + preview UI ────────────────────────────────────
+let _pendingStatementCandidates = [];
+
+async function handleStatementUpload(files) {
+  if (!files || files.length === 0) return;
+  showSyncBar('syncing', '📄', `Parsing ${files.length} file${files.length === 1 ? '' : 's'}…`);
+  const all = [];
+  const errors = [];
+  for (const file of Array.from(files)) {
+    try {
+      const isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name);
+      const text = isPdf ? await extractPdfText(file) : await file.text();
+      const parsed = isPdf ? parsePdfStatement(text) : parseCSVStatement(text);
+      // Tag with source filename so the user can see where each row came from.
+      parsed.forEach(p => { p._sourceFile = file.name; });
+      all.push(...parsed);
+    } catch (e) {
+      console.error('[statement]', file.name, e);
+      errors.push(`${file.name}: ${e.message || e}`);
+    }
+  }
+
+  if (errors.length) {
+    showSyncBar('error', '⚠️', `Parse failed for ${errors.length} file: ${errors[0].slice(0, 120)}`);
+    if (all.length === 0) return;
+  }
+
+  // Split into new vs already-present using STRICT matching against the
+  // existing transactions array.
+  const newOnes = [];
+  const skipped = [];
+  for (const c of all) {
+    const dup = transactions.some(t => isStatementStrictMatch(c, t));
+    if (dup) skipped.push(c);
+    else newOnes.push(c);
+  }
+
+  // Self-dedup: two rows from the same upload that look identical also
+  // collapse — common when a CSV and PDF cover the same period.
+  const seen = new Set();
+  const deduped = [];
+  for (const c of newOnes) {
+    const key = `${c.date}|${normalizeMerchantStrict(c.merchant)}|${c.amount.toFixed(2)}|${c.last4 || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(c);
+  }
+
+  _pendingStatementCandidates = deduped;
+  showStatementPreview(deduped, skipped, errors);
+}
+
+function showStatementPreview(newOnes, skipped, errors) {
+  const titleEl = document.getElementById('statementPreviewTitle');
+  const summaryEl = document.getElementById('statementPreviewSummary');
+  const listEl = document.getElementById('statementPreviewList');
+  const importBtn = document.getElementById('statementPreviewImportBtn');
+  if (!listEl) return;
+
+  titleEl.textContent = 'Statement Preview';
+  const lines = [
+    `<strong>${newOnes.length}</strong> new transaction${newOnes.length === 1 ? '' : 's'} ready to import.`,
+    `<strong>${skipped.length}</strong> already in your data — skipped.`,
+  ];
+  if (errors && errors.length) lines.push(`<span style="color:var(--red)"><strong>${errors.length}</strong> file failed to parse.</span>`);
+  summaryEl.innerHTML = lines.join('<br>');
+
+  if (newOnes.length === 0) {
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-dim);font-size:13px;border:1px dashed var(--border);border-radius:8px">Nothing new to import. Your data is already in sync with these statements. ✅</div>';
+    importBtn.disabled = true;
+    importBtn.style.opacity = '0.5';
+  } else {
+    importBtn.disabled = false;
+    importBtn.style.opacity = '';
+    // Header row + checkbox per candidate.
+    const rowsHtml = newOnes.map((c, i) => `
+      <label style="display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);cursor:pointer">
+        <input type="checkbox" class="stmt-row-check" data-idx="${i}" checked style="width:16px;height:16px;accent-color:var(--accent)">
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.merchant.replace(/</g, '&lt;')}</div>
+          <div style="font-size:11px;color:var(--text-dim)">${c.date}${c.last4 ? ' · •••• ' + c.last4 : ''}${c._sourceFile ? ' · ' + c._sourceFile : ''}</div>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:13px;font-variant-numeric:tabular-nums">$${Number(c.amount).toFixed(2)}</div>
+      </label>
+    `).join('');
+    listEl.innerHTML = `<div style="font-size:11px;font-weight:700;letter-spacing:0.06em;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">New charges (uncheck to skip)</div>${rowsHtml}`;
+  }
+
+  document.getElementById('statementPreviewModal').classList.add('open');
+}
+
+function confirmStatementImport() {
+  const checks = document.querySelectorAll('.stmt-row-check');
+  const selected = [];
+  checks.forEach(cb => {
+    if (cb.checked) {
+      const idx = parseInt(cb.dataset.idx, 10);
+      const c = _pendingStatementCandidates[idx];
+      if (c) selected.push(c);
+    }
+  });
+  if (selected.length === 0) {
+    closeModal('statementPreviewModal');
+    showSyncBar('success', '✓', 'Nothing imported.');
+    return;
+  }
+
+  // Resolve each candidate to a card_id when last4 matches one of the
+  // user's cards. Otherwise leave card unresolved — better than guessing.
+  for (const c of selected) {
+    let cardId = null;
+    if (c.last4) {
+      const found = CARDS.find(card => card.last4 === c.last4);
+      if (found) cardId = found.id;
+    }
+    transactions.push({
+      id: crypto.randomUUID(),
+      amount: Number(c.amount),
+      merchant: c.merchant,
+      category: (typeof autoCategory === 'function') ? autoCategory(c.merchant) : 'other',
+      card: cardId,
+      date: c.date,
+      time: '12:00',
+      source: 'statement',
+    });
+  }
+
+  // Run the same dedup pass we run after a Gmail sync so any rows that
+  // somehow slipped through the strict match still get collapsed.
+  if (typeof dedupeTransactions === 'function') dedupeTransactions();
+  saveToStorage();
+  closeModal('statementPreviewModal');
+  if (typeof renderAll === 'function') renderAll();
+  if (typeof renderFinanceHub === 'function') renderFinanceHub();
+  showSyncBar('success', '✅', `Imported <strong>${selected.length}</strong> transaction${selected.length === 1 ? '' : 's'} from statement`);
+  _pendingStatementCandidates = [];
 }
 
 // ═══ TAB BAR: sync active state with current page ═══
