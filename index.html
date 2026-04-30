@@ -9496,40 +9496,98 @@ function adjustAccountBalance(accountId, delta) {
   renderCashTile();
 }
 
-/** Project the user's cash on hand 3 months out, based on the average
- *  monthly net (income − expenses) across the last 3 completed months.
- *  Returns null when we lack enough signal to project. */
+/** Count how many times a scheduled movement fires within the next
+ *  `monthsForward` months from `fromDate`. Monthly = monthsForward;
+ *  weekly = the actual count of matching weekdays in the window. */
+function countScheduleOccurrences(s, fromDate, monthsForward) {
+  const freq = s.frequency || 'monthly';
+  if (freq === 'monthly') return monthsForward;
+  if (freq === 'weekly') {
+    const targetDow = (s.dayOfWeek == null) ? 4 : Number(s.dayOfWeek);
+    const end = new Date(fromDate);
+    end.setMonth(end.getMonth() + monthsForward);
+    let count = 0;
+    const d = new Date(fromDate);
+    while (d <= end) {
+      if (d.getDay() === targetDow) count++;
+      d.setDate(d.getDate() + 1);
+    }
+    return count;
+  }
+  return monthsForward;
+}
+
+/** Net cash impact (only on bank/debit accounts) of all active schedules
+ *  over the next `monthsForward` months. Transfers between cash accounts
+ *  net to zero so we ignore them. */
+function projectScheduledCashNet(fromDate, monthsForward) {
+  let total = 0;
+  for (const s of scheduledMovements || []) {
+    if (!s.active) continue;
+    const occ = countScheduleOccurrences(s, fromDate, monthsForward);
+    const amt = Number(s.amount) || 0;
+    if (s.kind === 'income') total += amt * occ;
+    else if (s.kind === 'outflow' || s.kind === 'card_payment') total -= amt * occ;
+    // 'transfer' moves cash between two accounts both already in cashOnHand,
+    // so the net effect on total cash is zero — skip.
+  }
+  return total;
+}
+
+/** Forward-looking 3-month cash projection. Uses past 3 months as the
+ *  expense baseline, and pulls expected income + scheduled flows from
+ *  declared recurring income, one-time future-dated income, and active
+ *  scheduled_movements. So adding a recurring "$5,000 → Savings"
+ *  paycheck immediately moves the number; no backfill needed. */
 function projectCashTrend() {
   const accounts = getCashAccounts();
   if (accounts.length === 0) return null;
   const currentCash = totalCashOnHand();
 
   const now = new Date();
-  // Pacific-time anchor for "this month" so the trend window matches
-  // every other month-aware piece of the app.
   const ptYear = parseInt(new Intl.DateTimeFormat('en-CA', { year: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10);
   const ptMonthIdx = parseInt(new Intl.DateTimeFormat('en-CA', { month: 'numeric', timeZone: 'America/Los_Angeles' }).format(now), 10) - 1;
 
-  // Walk the last 3 *completed* months (not including the in-progress one).
-  const nets = [];
+  // 1) Average monthly expenses across the last 3 completed months. We
+  //    use this as the expense rate going forward — there's no good
+  //    forward-looking proxy for general spending.
+  let expensesSum = 0;
+  let nMonths = 0;
   for (let i = 1; i <= 3; i++) {
     let m = ptMonthIdx - i;
     let y = ptYear;
     while (m < 0) { m += 12; y -= 1; }
-    const incomeM = (typeof getMonthIncome === 'function') ? getMonthIncome(y, m) : 0;
     const txs = (typeof getMonthTransactions === 'function') ? getMonthTransactions(y, m, 'all') : [];
-    const expensesM = txs.reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
-    nets.push(incomeM - expensesM);
+    expensesSum += txs.reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
+    nMonths++;
   }
-  if (nets.length === 0) return null;
+  const avgMonthlyExpense = nMonths > 0 ? (expensesSum / nMonths) : 0;
 
-  const avgMonthlyNet = nets.reduce((s, n) => s + n, 0) / nets.length;
-  const projected3mo = currentCash + (avgMonthlyNet * 3);
+  // 2) Expected income for the next 3 months. getMonthIncome already
+  //    handles recurring (monthly / biweekly / weekly) entries plus
+  //    one-time entries dated within the queried month — so a paycheck
+  //    just added today shows up in next month's projection.
+  let forwardIncome = 0;
+  for (let i = 1; i <= 3; i++) {
+    let m = ptMonthIdx + i;
+    let y = ptYear;
+    while (m > 11) { m -= 12; y += 1; }
+    forwardIncome += (typeof getMonthIncome === 'function') ? (getMonthIncome(y, m) || 0) : 0;
+  }
+
+  // 3) Scheduled movements with cash impact (income / outflow / card
+  //    payment) over the next 3 months. Transfers net to zero.
+  const scheduledNet = projectScheduledCashNet(now, 3);
+
+  const projected3mo = currentCash + forwardIncome - (avgMonthlyExpense * 3) + scheduledNet;
   const delta = projected3mo - currentCash;
-  // Pct only meaningful when there's a base to compare against.
   const pctChange = currentCash > 0 ? (delta / currentCash) * 100 : null;
 
-  return { avgMonthlyNet, projected3mo, currentCash, delta, pctChange };
+  return {
+    avgMonthlyNet: (forwardIncome / 3) - avgMonthlyExpense + (scheduledNet / 3),
+    projected3mo, currentCash, delta, pctChange,
+    forwardIncome, avgMonthlyExpense, scheduledNet,
+  };
 }
 
 // ─── Cash on Hand tile (Dashboard) ─────────────────────────────────────
