@@ -5626,7 +5626,15 @@ async function flushToCloud() {
 // and in the cloud. Runs after loadFromCloud to clean up any lingering junk
 // from earlier buggy migration attempts.
 function dedupeTransactions() {
-  const seen = new Map();  // key → first-seen tx
+  // Source priority — when collapsing duplicates we keep the row with
+  // the most "linkable" source so we don't lose ties to email IDs
+  // (which the Gmail sync uses to skip already-imported emails). A
+  // statement-imported row is more authoritative than a manual entry,
+  // since the user uploaded a bank-of-record document for it.
+  const SRC_RANK = { gmail: 3, statement: 2, manual: 1, subscription: 1 };
+  const rank = (tx) => SRC_RANK[tx?.source] ?? 0;
+
+  const seen = new Map();  // key → currently-kept tx
   const dupes = [];        // duplicates to remove
   for (const tx of transactions) {
     // Include the time so two legit charges at the same merchant for the
@@ -5636,10 +5644,18 @@ function dedupeTransactions() {
     // not match its locally-saved twin and dedupe would either over- or
     // under-collapse depending on which side missed time.
     const key = [tx.date, tx.merchant, Number(tx.amount).toFixed(2), tx.card || '', tx.time || '12:00'].join('|');
-    if (seen.has(key)) {
-      dupes.push(tx);
-    } else {
+    const prev = seen.get(key);
+    if (!prev) {
       seen.set(key, tx);
+      continue;
+    }
+    // Already have a row for this key. Keep whichever has the higher
+    // source-rank; mark the loser as a duplicate.
+    if (rank(tx) > rank(prev)) {
+      dupes.push(prev);
+      seen.set(key, tx);
+    } else {
+      dupes.push(tx);
     }
   }
   if (dupes.length === 0) return;
@@ -9567,7 +9583,8 @@ function projectScheduledCashNet(fromDate, monthsForward) {
   // paycheck loses that signal in the projection — the breakdown line
   // surfaces this so it's diagnosable.
   const hasRecurringIncome = (incomeEntries || []).some(e =>
-    e.frequency === 'monthly' || e.frequency === 'weekly' || e.frequency === 'biweekly'
+    Number(e.amount) > 0 &&
+    (e.frequency === 'monthly' || e.frequency === 'weekly' || e.frequency === 'biweekly')
   );
   let total = 0;
   for (const s of scheduledMovements || []) {
@@ -9614,7 +9631,9 @@ function projectCashTrend() {
     while (m < 0) { m += 12; y -= 1; }
     const txs = (typeof getMonthTransactions === 'function') ? getMonthTransactions(y, m, 'all') : [];
     if (txs.length === 0) continue;
-    expensesSum += txs.reduce((s, tx) => s + (Number(tx.amount) || 0), 0);
+    // Refunds occasionally land as negative-amount rows; ignore them
+    // here so the expense baseline reflects gross spend, not net.
+    expensesSum += txs.reduce((s, tx) => s + Math.max(0, Number(tx.amount) || 0), 0);
     nMonths++;
   }
   const avgMonthlyExpense = nMonths > 0 ? (expensesSum / nMonths) : 0;
@@ -10008,8 +10027,14 @@ function applyAutoSchedules() {
   // Day-of-week + week period key in Pacific time. The week key anchors
   // to the most recent Sunday so all days Sun–Sat in the same week share
   // the same key — fires once per week, not once per matching day.
+  // Use Intl with the Pacific timezone so the day-of-week comes from
+  // PT regardless of where the user's machine is set (a Sydney-local
+  // tab on a US PT date would otherwise read tomorrow's DOW).
+  const PT_DOW_MAP = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const ptDowShort = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'America/Los_Angeles' }).format(now);
+  const todayDow = PT_DOW_MAP[ptDowShort] ?? 0;
+  // Most recent Sunday's PT date string — the period key.
   const ptToday = new Date(ptDateStr() + 'T12:00:00');
-  const todayDow = ptToday.getDay(); // 0=Sun … 6=Sat
   const weekAnchor = new Date(ptToday);
   weekAnchor.setDate(weekAnchor.getDate() - todayDow);
   const weekKey = 'w:' + ptDateStr(weekAnchor);
@@ -10065,12 +10090,19 @@ function applyAutoSchedules() {
 
 function applyOneSchedule(s, periodKey, effectiveDay) {
   // Build a transaction date string for the ledger entry. Monthly: use
-  // the period's YYYY-MM + the (clamped) day. Weekly: the period key is
-  // already the Sunday-anchored YYYY-MM-DD; use today's PT date so the
-  // entry lands on the actual fire day.
+  // the period's YYYY-MM + the (clamped) day. Weekly: stamp the entry
+  // with this week's *target* day-of-week, not the day the user
+  // happened to open the app — opening Friday on a "Wed rent" schedule
+  // should still land the row on Wed of the same week so totals roll
+  // up to the right week / month.
   let dateStr;
   if ((s.frequency || 'monthly') === 'weekly') {
-    dateStr = ptDateStr();
+    // periodKey is "w:YYYY-MM-DD" where YYYY-MM-DD is this week's Sun.
+    const weekSun = periodKey.replace(/^w:/, '');
+    const targetDow = (s.dayOfWeek == null) ? 4 : Number(s.dayOfWeek);
+    const sun = new Date(weekSun + 'T12:00:00');
+    sun.setDate(sun.getDate() + targetDow);
+    dateStr = ptDateStr(sun);
   } else {
     const day = effectiveDay || s.dayOfMonth || 1;
     const yyyymm = periodKey.replace(/^m:/, '');
@@ -10183,7 +10215,15 @@ function csvSplit(line) {
   return out.map(s => s.trim());
 }
 
-/** Parse "MM/DD/YYYY", "MM-DD-YYYY", "MM/DD/YY", "YYYY-MM-DD" → ISO. */
+const _MONTH_ABBR = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/** Parse a wide range of statement date formats → 'YYYY-MM-DD'.
+ *  Supported:
+ *    YYYY-MM-DD, MM/DD/YYYY, MM-DD-YYYY, MM/DD/YY, MM/DD,
+ *    "Jan 15, 2026", "Jan 15", "15 Jan 2026", "15-Mar-26". */
 function parseStatementDate(s) {
   if (!s) return null;
   s = s.trim();
@@ -10197,7 +10237,31 @@ function parseStatementDate(s) {
     if (y.length === 2) y = (parseInt(y, 10) > 70 ? '19' : '20') + y;
     return `${y}-${String(m[1]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
   }
-  // "MM/DD" without year — assume current year (statement context)
+  // "Jan 15, 2026", "Jan 15"
+  m = s.match(/^([A-Za-z]{3,4})\.?\s+(\d{1,2})(?:,?\s*(\d{2,4}))?$/);
+  if (m) {
+    const mon = _MONTH_ABBR[m[1].toLowerCase()];
+    if (mon) {
+      let y = m[3];
+      if (!y) y = new Date().getFullYear();
+      else if (y.length === 2) y = (parseInt(y, 10) > 70 ? '19' : '20') + y;
+      return `${y}-${String(mon).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
+    }
+  }
+  // "15 Jan 2026", "15-Mar-26", "15 March 2026"
+  m = s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,9})\.?[\s\-](\d{2,4})$/);
+  if (m) {
+    const mon = _MONTH_ABBR[m[2].slice(0,4).toLowerCase()] || _MONTH_ABBR[m[2].slice(0,3).toLowerCase()];
+    if (mon) {
+      let y = m[3];
+      if (y.length === 2) y = (parseInt(y, 10) > 70 ? '19' : '20') + y;
+      return `${y}-${String(mon).padStart(2,'0')}-${String(m[1]).padStart(2,'0')}`;
+    }
+  }
+  // "MM/DD" without year — assume current year. (Edge case: a Dec entry
+  // uploaded in early Jan would mis-tag — acceptable; statement headers
+  // usually disambiguate, and the matching is exact-day so a wrong year
+  // means "no match" rather than "wrong import".)
   m = s.match(/^(\d{1,2})[\/-](\d{1,2})$/);
   if (m) {
     const y = new Date().getFullYear();
@@ -10219,12 +10283,16 @@ function isPaymentOrCredit(desc, signedAmount) {
   return false;
 }
 
-/** Normalize merchant for matching (uppercase, strip noise / suffixes). */
+/** Normalize merchant for matching (uppercase, strip noise / suffixes).
+ *  The "in CITY, ST[, USA]" suffix strip requires an explicit state code
+ *  with a comma — otherwise greedy patterns swallow real merchant
+ *  names like "IN N OUT BURGER" → empty string and false-collide with
+ *  unrelated merchants. */
 function normalizeMerchantStrict(m) {
   return (m || '').toUpperCase()
     .replace(/[*#]+/g, ' ')
     .replace(/\s+(?:LLC|INC|CORP|LTD|CO\.?)\b\.?/g, '')
-    .replace(/\s+IN\s+[A-Z][A-Z\s]+(?:,\s*[A-Z]{2}(?:,\s*USA)?)?$/, '')
+    .replace(/\s+IN\s+[A-Z][A-Z\s]+,\s*[A-Z]{2}(?:,\s*USA)?$/, '')
     .replace(/[^A-Z0-9 ]/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -10265,14 +10333,24 @@ function parseCSVStatement(csvText) {
   const descIdx  = findIdx(/^(description|merchant|details|payee|memo|narrative)$/) >= 0
     ? findIdx(/^(description|merchant|details|payee|memo|narrative)$/)
     : findIdx(/description|merchant|details|payee|memo/);
-  const amountIdx = findIdx(/^amount$/);
-  const debitIdx  = findIdx(/^(debit|withdrawal|charges?|outflow)$/);
-  const creditIdx = findIdx(/^(credit|deposit|payment|inflow)$/);
+  // Loose fallback to catch 'Transaction Amount', 'Amount (USD)', 'Amt' etc.
+  // Try strict match first so a stray 'Available Amount' summary column
+  // doesn't out-rank the real one.
+  const amountIdx = findIdx(/^(amount|amt|transaction\s*amount|amount\s*\(.*\))$/) >= 0
+    ? findIdx(/^(amount|amt|transaction\s*amount|amount\s*\(.*\))$/)
+    : findIdx(/amount|amt/);
+  const debitIdx  = findIdx(/^(debit|withdrawal|charges?|outflow|withdrawals\s*&\s*subtractions)$/);
+  const creditIdx = findIdx(/^(credit|deposit|payment|inflow|deposits\s*&\s*additions)$/);
+  // Optional account/last4 column so candidates auto-resolve to the user's card.
+  const last4Idx = findIdx(/^(account\s*(?:number|#)?|card\s*(?:number|#)?|last\s*4)$/) >= 0
+    ? findIdx(/^(account\s*(?:number|#)?|card\s*(?:number|#)?|last\s*4)$/)
+    : findIdx(/account|card/);
 
   if (dateIdx < 0 || descIdx < 0) return []; // can't make sense of the file
 
   // First pass: collect signed amounts so we can detect the bank's
-  // sign convention.
+  // sign convention. Also extract a per-row last4 if the CSV has a card
+  // / account column — many bank exports include it.
   const raw = [];
   for (let i = 1; i < lines.length; i++) {
     const cells = csvSplit(lines[i]);
@@ -10282,26 +10360,45 @@ function parseCSVStatement(csvText) {
     const date = parseStatementDate(dateStr);
     if (!date) continue;
     let signedAmount = 0;
-    if (amountIdx >= 0) {
-      const v = parseFloat((cells[amountIdx] || '').replace(/[$,]/g, ''));
-      if (Number.isFinite(v)) signedAmount = v;
-    } else if (debitIdx >= 0 || creditIdx >= 0) {
+    let usesSeparateCols = false;
+    if (debitIdx >= 0 || creditIdx >= 0) {
       const debit  = parseFloat((cells[debitIdx]  || '').replace(/[$,]/g, ''));
       const credit = parseFloat((cells[creditIdx] || '').replace(/[$,]/g, ''));
-      if (Number.isFinite(debit) && debit > 0)  signedAmount = -Math.abs(debit);
-      else if (Number.isFinite(credit) && credit > 0) signedAmount = Math.abs(credit);
+      if (Number.isFinite(debit) && debit > 0)        { signedAmount = -Math.abs(debit); usesSeparateCols = true; }
+      else if (Number.isFinite(credit) && credit > 0) { signedAmount =  Math.abs(credit); usesSeparateCols = true; }
+    }
+    if (!signedAmount && amountIdx >= 0) {
+      const v = parseFloat((cells[amountIdx] || '').replace(/[$,]/g, ''));
+      if (Number.isFinite(v)) signedAmount = v;
     }
     if (!signedAmount) continue;
-    raw.push({ date, desc, signedAmount });
+    let last4 = null;
+    if (last4Idx >= 0) {
+      const m = (cells[last4Idx] || '').match(/(\d{4})\s*$/);
+      if (m) last4 = m[1];
+    }
+    raw.push({ date, desc, signedAmount, last4, usesSeparateCols });
   }
 
-  // Detect convention: Amex / Capital One CSV typically use POSITIVE for
-  // debits and negative for credits. Most bank checking exports use the
-  // opposite. Use majority sign of non-zero rows as a heuristic.
-  let posCount = 0, negCount = 0;
-  for (const r of raw) { if (r.signedAmount > 0) posCount++; else if (r.signedAmount < 0) negCount++; }
-  // If there's a clear majority, that's the "debit" sign.
-  const positiveIsDebit = posCount > negCount;
+  // Detect sign convention. Separate-column layouts already gave us the
+  // sign (negative for debit, positive for credit) so we can trust them.
+  // For single-Amount layouts: Amex / Capital One typically use POSITIVE
+  // for debits, most bank checking exports use NEGATIVE. Only flip the
+  // default when a strong majority (≥ 70%) of rows agree — refuse to
+  // commit to a flip on close-to-50/50 data, which would otherwise mis-
+  // classify a refund-heavy month as charges.
+  let positiveIsDebit;
+  if (raw.length > 0 && raw.every(r => r.usesSeparateCols)) {
+    positiveIsDebit = false; // separate cols already encoded
+  } else {
+    let posCount = 0, negCount = 0;
+    for (const r of raw) { if (r.signedAmount > 0) posCount++; else if (r.signedAmount < 0) negCount++; }
+    const total = posCount + negCount;
+    if (total === 0) positiveIsDebit = false;
+    else if (posCount / total >= 0.70) positiveIsDebit = true;
+    else if (negCount / total >= 0.70) positiveIsDebit = false;
+    else positiveIsDebit = false; // tied / ambiguous → default to bank-checking convention
+  }
 
   const candidates = [];
   for (const r of raw) {
@@ -10310,12 +10407,12 @@ function parseCSVStatement(csvText) {
     const isDebit = positiveIsDebit ? r.signedAmount > 0 : r.signedAmount < 0;
     if (!isDebit) continue;
     const amount = Math.abs(r.signedAmount);
-    if (amount <= 0 || amount > 50000) continue; // statement summary rows tend to be huge
+    if (amount <= 0 || amount > 200000) continue; // skip extreme outliers (likely a balance row)
     candidates.push({
       date: r.date,
       merchant: r.desc.trim().slice(0, 80),
       amount,
-      last4: null,
+      last4: r.last4,
       source: 'statement',
     });
   }
@@ -10338,32 +10435,51 @@ function parsePdfStatement(text, hintIssuer) {
   const last4Match = text.match(/(?:account|card)\s+(?:ending\s+in\s+|number[\s\S]*?\b)(\d{4})\b/i);
   if (last4Match) last4 = last4Match[1];
 
+  // Date prefix patterns at the start of a transaction line. We try
+  // numeric formats first (most common), then text-month formats.
+  const DATE_PREFIX_RES = [
+    /^[^\d]{0,3}(\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)\b/,      // 03/15, 03/15/26
+    /^[^\dA-Z]{0,3}([A-Za-z]{3,4}\.?\s+\d{1,2}(?:,?\s*\d{2,4})?)\b/, // Jan 15, 2026
+    /^[^\d]{0,3}(\d{1,2}[\s\-][A-Za-z]{3,9}\.?[\s\-]\d{2,4})\b/,// 15-Mar-26
+  ];
+
   for (const raw of lines) {
     const line = raw.trim();
     if (line.length < 6) continue;
     if (isSummaryContext(line)) continue;
 
-    // Date at start (allow leading bullet / page artifacts).
-    const dateAtStart = line.match(/^[^\d]{0,3}(\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?)/);
-    if (!dateAtStart) continue;
-    const date = parseStatementDate(dateAtStart[1]);
+    // Date at start.
+    let dateMatch = null;
+    for (const re of DATE_PREFIX_RES) {
+      const m = line.match(re);
+      if (m) { dateMatch = m; break; }
+    }
+    if (!dateMatch) continue;
+    const date = parseStatementDate(dateMatch[1]);
     if (!date) continue;
 
-    // Amount at the end. Some PDFs render negatives as "-$10.00" or "($10.00)".
-    const amtMatch = line.match(/(-?\$?\s*\(?\$?[\d,]+\.\d{2}\)?)\s*(?:CR|DR)?\s*$/i);
-    if (!amtMatch) continue;
+    // Pick the FIRST money-shaped token after the date — for PDF rows
+    // with both a charge and a running balance ("...AMAZON.COM $42.95
+    // $1,234.00"), the charge is always first and the balance is the
+    // trailing column. Picking last would import the balance as the
+    // amount (false-positive inflation).
+    const dateEnd = dateMatch.index + dateMatch[0].length;
+    const tail = line.slice(dateEnd);
+    const moneyRe = /(-?\$?\s*\(?\$?[\d,]+\.\d{2}\)?)/g;
+    const allMoney = [...tail.matchAll(moneyRe)];
+    if (allMoney.length === 0) continue;
+    const amtMatch = allMoney[0];
     const amtRaw = amtMatch[1];
     const negative = /^-/.test(amtRaw) || /^\(/.test(amtRaw);
-    const amount = parseFloat(amtRaw.replace(/[\$,()\s-]/g, ''));
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 50000) continue;
+    const amount = parseFloat(amtRaw.replace(/[\$,()\s]/g, '').replace(/^-/, ''));
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 200000) continue;
 
-    // Description = whatever's between the date and the amount.
-    const dateEnd = dateAtStart.index + dateAtStart[0].length;
-    const amtStart = line.lastIndexOf(amtMatch[1]);
-    const desc = line.slice(dateEnd, amtStart).trim();
+    // Description = everything between the date and the first money token.
+    const desc = tail.slice(0, amtMatch.index).trim();
     if (!desc || desc.length < 2) continue;
     if (isPaymentOrCredit(desc, negative ? -amount : amount)) continue;
-    if (negative) continue; // explicit credit; skip
+    if (negative) continue;        // explicit credit; skip
+    if (/\bCR\b/i.test(line.slice(dateEnd + amtMatch.index))) continue; // "CR" suffix marks credit
 
     candidates.push({
       date,
@@ -10491,11 +10607,13 @@ function confirmStatementImport() {
       const found = CARDS.find(card => card.last4 === c.last4);
       if (found) cardId = found.id;
     }
+    let cat = (typeof autoCategory === 'function') ? autoCategory(c.merchant) : null;
+    if (!cat) cat = 'other'; // never store a falsy category — breaks renderCategories sums.
     transactions.push({
       id: crypto.randomUUID(),
       amount: Number(c.amount),
       merchant: c.merchant,
-      category: (typeof autoCategory === 'function') ? autoCategory(c.merchant) : 'other',
+      category: cat,
       card: cardId,
       date: c.date,
       time: '12:00',
@@ -10507,9 +10625,16 @@ function confirmStatementImport() {
   // somehow slipped through the strict match still get collapsed.
   if (typeof dedupeTransactions === 'function') dedupeTransactions();
   saveToStorage();
+  // Force flush to cloud immediately — without this, a user who closes
+  // the tab inside the 1.5s scheduleFlush debounce loses every imported
+  // row on the next sign-in (loadFromCloud would replace `transactions`
+  // with cloud's copy that doesn't have them).
+  if (typeof scheduleFlush === 'function') scheduleFlush(0);
   closeModal('statementPreviewModal');
   if (typeof renderAll === 'function') renderAll();
   if (typeof renderFinanceHub === 'function') renderFinanceHub();
+  if (typeof renderCashFlowCalendar === 'function') renderCashFlowCalendar();
+  if (typeof renderAccountsPage === 'function') renderAccountsPage();
   showSyncBar('success', '✅', `Imported <strong>${selected.length}</strong> transaction${selected.length === 1 ? '' : 's'} from statement`);
   _pendingStatementCandidates = [];
 }
