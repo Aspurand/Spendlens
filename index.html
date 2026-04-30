@@ -3870,6 +3870,10 @@ select.form-input {
     <div><div class="setting-label">Force Cloud Sync</div><div class="setting-desc">Push local data to cloud now</div></div>
     <div class="setting-arrow">›</div>
   </div>
+  <div class="setting-item" onclick="forceRescanGmail()">
+    <div><div class="setting-label">Force Re-scan Gmail</div><div class="setting-desc">Clear processed-email cache and pull last 30 days again</div></div>
+    <div class="setting-arrow">›</div>
+  </div>
   <div class="setting-item" onclick="clearAllData()">
     <div><div class="setting-label" style="color:var(--red)">Clear All Data</div><div class="setting-desc">Remove all transactions</div></div>
     <div class="setting-arrow">›</div>
@@ -5221,6 +5225,33 @@ async function loadFromCloud() {
   }
 }
 
+// ─── Force Re-scan Gmail ─────────────────────────────────────
+// Clears the processed-email caches (both local + queues the cloud
+// rows for delete) and re-runs syncGmail. Use this to recover any
+// emails that earlier sync attempts marked processed-but-failed —
+// e.g., after a parser bug fix lands and the previously-stuck IDs
+// would otherwise be skipped forever. The dedupeTransactions pass
+// at the end of syncGmail catches any over-imports.
+async function forceRescanGmail() {
+  if (!gmailAccessToken) {
+    showSyncBar('error', '📧', 'Gmail not connected. Tap Sync Gmail first.');
+    return;
+  }
+  if (!confirm('Re-scan all Gmail emails from the last 30 days? This drops the processed-email cache so any previously-skipped emails will be re-tried.')) return;
+
+  // Queue cloud-side deletes for every processed-email row we know about.
+  if (currentUserId) {
+    processedEmailIds.forEach(id => cloudDeletes.processed_emails.push({ email_id: id, kind: 'transaction' }));
+    processedPaymentEmailIds.forEach(id => cloudDeletes.processed_emails.push({ email_id: id, kind: 'payment' }));
+    persistCloudDeletes();
+  }
+  processedEmailIds = new Set();
+  processedPaymentEmailIds = new Set();
+  saveToStorage();
+  showSyncBar('syncing', '🔁', 'Re-scanning Gmail…');
+  await syncGmail(false);
+}
+
 // ─── Cloud flush (debounced) ─────────────────────────────────
 // ─── Manual flush trigger — surfaces errors to the user ─────
 async function forceCloudSync() {
@@ -5683,8 +5714,17 @@ async function syncGmail(silent = false) {
           transactions.push(tx);
           newlyAddedTxIds.push(tx.id);
           totalNew++;
+          // Only mark as processed when parsing succeeded — otherwise a
+          // single broken parse pass would permanently exclude the email
+          // from every future sync, even after a parser fix lands.
+          processedEmailIds.add(msgId);
+        } else {
+          // Surface the failure so it's diagnosable from the browser
+          // console without UI plumbing. Subjects only — no body content.
+          const headers = msg.payload?.headers || [];
+          const subj = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+          console.warn('[gmail] parse failed for', issuer, 'msgId', msgId, 'subject:', subj);
         }
-        processedEmailIds.add(msgId);
       }
     } catch(e) {
       if (e.status === 401) {
@@ -5721,8 +5761,14 @@ async function syncGmail(silent = false) {
         if (payment) {
           savePayment(payment.cardId, 'gmail', payment.amount, payment.date);
           totalPayments++;
+          // Same rule as above: don't burn-out a payment email's id when
+          // we couldn't parse it — a parser fix should pick it up later.
+          processedPaymentEmailIds.add(msgId);
+        } else {
+          const headers = msg.payload?.headers || [];
+          const subj = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+          console.warn('[gmail] payment parse failed for', issuer, 'msgId', msgId, 'subject:', subj);
         }
-        processedPaymentEmailIds.add(msgId);
       }
     } catch(e) { /* non-fatal — payment emails best-effort */ }
   }
