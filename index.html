@@ -7996,7 +7996,7 @@ function renderFinanceHub(){
     if(!entries.length){incEl.innerHTML=`<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius-sm)">No income logged. Tap + to add.</div>`;}
     else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+${fmtMoney(e.amount)}</div><span class="income-del" onclick="deleteIncome('${e.id}')">✕</span></div>`).join('');
   }
-  renderNetWorth(totalSpent);
+  renderNetWorth();
 }
 
 function renderVelocityCard(currentSpent){
@@ -8015,14 +8015,19 @@ function renderVelocityCard(currentSpent){
   el.innerHTML=`<div class="velocity-card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><div style="font-size:12px;color:var(--text-dim);font-weight:600">Daily Rate</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px">${fmtMoney(dailyRate)}<span style="font-size:12px;color:var(--text-muted)">/day</span></div></div><div style="text-align:right"><div style="font-size:12px;color:var(--text-dim);font-weight:600">Projection</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px;color:${pct>=100?'var(--red)':pct>=80?'var(--amber)':'var(--text)'}">${fmtMoney(projectedTotal, {decimals: 0})}</div></div></div>${baseline?`<div class="velocity-bar"><div class="velocity-fill" style="width:${pct}%;background:${fillColor}"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)"><span>${pct.toFixed(0)}% of avg (${fmtMoney(baseline, {decimals: 0})})</span><span>${daysLeft}d left</span></div><div class="velocity-projection">${pct>=100?`⚠️ On track to <strong style="color:var(--red)">exceed</strong> avg by ${fmtMoney((projectedTotal-baseline), {decimals: 0})}`:pct>=80?`📊 Approaching average — ${fmtMoney((baseline-currentSpent), {decimals: 0})} buffer left`:`✅ Healthy — ${fmtMoney((baseline-projectedTotal), {decimals: 0})} under average`}</div>`:'<div style="font-size:12px;color:var(--text-muted);margin-top:8px">More months of data needed for velocity</div>'}</div>`;
 }
 
-function renderNetWorth(currentSpent){
+function renderNetWorth(){
   const el=document.getElementById('netWorthCard');if(!el)return;
-  // Use getEstimatedBalance so payments are reflected in the debt total
-  const totalDebt=CARDS.filter(c=>(c.type||'credit')==='credit').reduce((s,card)=>s+getEstimatedBalance(card.id).estimated,0);
-  const now=new Date();let estimatedCash=0;
-  for(let i=0;i<3;i++){const d=new Date(now.getFullYear(),now.getMonth()-i,1);const inc=getMonthIncome(d.getFullYear(),d.getMonth());const spent=getMonthTransactions(d.getFullYear(),d.getMonth(),'all').reduce((s,tx)=>s+tx.amount,0);estimatedCash+=Math.max(inc-spent,0);}
-  const netWorth=estimatedCash-totalDebt;
-  el.innerHTML=`<div class="net-worth-card"><div class="nw-row"><span style="color:var(--text-dim)">💰 Estimated Cash (3mo)</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">+${fmtMoney(estimatedCash, {decimals: 0})}</span></div><div class="nw-row"><span style="color:var(--text-dim)">💳 Card Debt (est.)</span><span style="color:${totalDebt>0?'var(--red)':'var(--text-dim)'};font-family:'JetBrains Mono',monospace;font-weight:600">${fmtMoney(-totalDebt, {decimals: 0})}</span></div><div class="nw-total"><span>Net Worth Est.</span><span style="color:${netWorth>=0?'var(--green)':'var(--red)'};font-family:'JetBrains Mono',monospace">${netWorth>=0?'+':'-'}${fmtMoney(Math.abs(netWorth), {decimals: 0})}</span></div>${totalDebt===0?'<div style="font-size:11px;color:var(--text-muted);margin-top:8px">Log card balances in Debt Planner for accuracy</div>':''}</div>`;
+  // Assets = the actual balances on bank/debit accounts (Checking, Savings,
+  // HYS, etc. — whatever flows through totalCashOnHand). Earlier this
+  // card summed "income − spend" over the past 3 months, which ignored
+  // real bank balances and over-counted the current month after the
+  // scheduled-income projection landed (a single projected paycheck made
+  // it look like 3 months of saved cash).
+  const cashOnHand = totalCashOnHand();
+  const totalDebt = CARDS.filter(c=>(c.type||'credit')==='credit')
+    .reduce((s,card)=>s+getEstimatedBalance(card.id).estimated, 0);
+  const netWorth = cashOnHand - totalDebt;
+  el.innerHTML=`<div class="net-worth-card"><div class="nw-row"><span style="color:var(--text-dim)">💰 Cash on Hand</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">${fmtMoney(cashOnHand)}</span></div><div class="nw-row"><span style="color:var(--text-dim)">💳 Card Debt (est.)</span><span style="color:${totalDebt>0?'var(--red)':'var(--text-dim)'};font-family:'JetBrains Mono',monospace;font-weight:600">${fmtMoney(-totalDebt)}</span></div><div class="nw-total"><span>Net Worth Est.</span><span style="color:${netWorth>=0?'var(--green)':'var(--red)'};font-family:'JetBrains Mono',monospace">${fmtMoney(netWorth)}</span></div>${totalDebt===0?'<div style="font-size:11px;color:var(--text-muted);margin-top:8px">Log card balances in Debt Planner for accuracy</div>':''}</div>`;
 }
 
 // ── NEW: Card balances panel in Finance Hub ──────────────────
