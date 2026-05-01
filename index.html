@@ -7974,12 +7974,12 @@ function renderFinanceHub(){
     const rc=savingsRate>=20?'var(--green)':savingsRate>=10?'var(--amber)':'var(--red)';
     const rcls=savingsRate>=20?'':savingsRate>=10?' warn':' bad';
     hero.innerHTML=`<div class="fin-hero-row">
-      <div class="fin-hero-item"><div class="fin-hero-label">Income</div><div class="fin-hero-value" style="color:var(--green)">${totalIncome>0?fmtMoney(totalIncome, {decimals: 0}):'—'}</div><div class="fin-hero-sub">${totalIncome>0?'This month':'Tap + to add'}</div></div>
-      <div class="fin-hero-item"><div class="fin-hero-label">Spent</div><div class="fin-hero-value" style="color:var(--red)">${fmtMoney(totalSpent, {decimals: 0})}</div><div class="fin-hero-sub">${f.length} transactions</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Income</div><div class="fin-hero-value" style="color:var(--green)">${totalIncome>0?fmtMoney(totalIncome):'—'}</div><div class="fin-hero-sub">${totalIncome>0?'This month':'Tap + to add'}</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Spent</div><div class="fin-hero-value" style="color:var(--red)">${fmtMoney(totalSpent)}</div><div class="fin-hero-sub">${f.length} transactions</div></div>
     </div>
     <div class="fin-divider"></div>
     <div class="fin-hero-row">
-      <div class="fin-hero-item"><div class="fin-hero-label">Net Savings</div><div class="fin-hero-value" style="color:${savings>=0?'var(--green)':'var(--red)'}">${savings>=0?'+':'-'}${fmtMoney(Math.abs(savings), {decimals: 0})}</div><div class="fin-hero-sub">${savings>=0?'Saved 🎉':'Over budget'}</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Net Savings</div><div class="fin-hero-value" style="color:${savings>=0?'var(--green)':'var(--red)'}">${savings>=0?'+':'-'}${fmtMoney(Math.abs(savings))}</div><div class="fin-hero-sub">${savings>=0?'Saved 🎉':'Over budget'}</div></div>
       <div class="fin-hero-item"><div class="fin-hero-label">Savings Rate</div><div class="fin-hero-value" style="color:${rc}">${totalIncome>0?savingsRate.toFixed(1)+'%':'—'}</div><div class="fin-hero-sub">${savingsRate>=20?'Excellent 🌟':savingsRate>=10?'Good':savingsRate>0?'Try for 20%':'Log income first'}</div></div>
     </div>
     ${totalIncome>0?`<div class="savings-rate-bar"><div class="savings-rate-fill${rcls}" style="width:${Math.min(savingsRate,100)}%"></div></div>`:''}`;
@@ -10482,29 +10482,45 @@ async function refreshFxRates(force) {
   const now = Date.now();
   const fetchedMs = usdInrRateFetchedAt ? Date.parse(usdInrRateFetchedAt) : 0;
   if (!force && fetchedMs && (now - fetchedMs) < FX_TTL_MS) return usdInrRate;
-  try {
-    const res = await fetch('https://api.frankfurter.app/latest?from=USD&to=INR');
-    if (!res.ok) throw new Error('fx fetch ' + res.status);
-    const data = await res.json();
-    const rate = data && data.rates && Number(data.rates.INR);
-    if (!Number.isFinite(rate) || rate <= 0) throw new Error('fx fetch: invalid payload');
-    usdInrRate = rate;
-    usdInrRateFetchedAt = new Date().toISOString();
+  // frankfurter.app started 301-redirecting in 2026 — the canonical host
+  // is now api.frankfurter.dev. We try .dev first, fall back to .app so an
+  // older cached install still works if .dev ever flips.
+  const endpoints = [
+    'https://api.frankfurter.dev/v1/latest?from=USD&to=INR',
+    'https://api.frankfurter.app/latest?from=USD&to=INR',
+  ];
+  let lastErr = null;
+  for (const url of endpoints) {
     try {
-      localStorage.setItem(FX_RATE_CACHE_KEY, JSON.stringify({
-        rate: usdInrRate, fetchedAt: usdInrRateFetchedAt,
-      }));
-    } catch (e) {}
-    // Persist to cloud so other devices reuse the same snapshot. Cheap —
-    // user_preferences is upserted on every flush anyway.
-    if (typeof scheduleFlush === 'function') scheduleFlush();
-    if (typeof renderAll === 'function') renderAll();
-    if (typeof renderSettingsCurrencySection === 'function') renderSettingsCurrencySection();
-    return rate;
-  } catch (e) {
-    console.warn('[fx] refresh failed', e);
-    return null;
+      const res = await fetch(url, { redirect: 'follow' });
+      if (!res.ok) { lastErr = new Error('HTTP ' + res.status); continue; }
+      const data = await res.json();
+      const rate = data && data.rates && Number(data.rates.INR);
+      if (!Number.isFinite(rate) || rate <= 0) { lastErr = new Error('invalid payload'); continue; }
+      usdInrRate = rate;
+      usdInrRateFetchedAt = new Date().toISOString();
+      try {
+        localStorage.setItem(FX_RATE_CACHE_KEY, JSON.stringify({
+          rate: usdInrRate, fetchedAt: usdInrRateFetchedAt,
+        }));
+      } catch (e) {}
+      if (typeof scheduleFlush === 'function') scheduleFlush();
+      if (typeof renderAll === 'function') renderAll();
+      if (typeof renderSettingsCurrencySection === 'function') renderSettingsCurrencySection();
+      if (force && typeof showSyncBar === 'function') {
+        showSyncBar('success', '💱', `Rate updated · 1 USD ≈ ₹${rate.toFixed(2)}`);
+      }
+      return rate;
+    } catch (e) {
+      lastErr = e;
+      continue;
+    }
   }
+  console.warn('[fx] refresh failed', lastErr);
+  if (force && typeof showSyncBar === 'function') {
+    showSyncBar('error', '💱', 'Rate fetch failed: ' + (lastErr?.message || 'network error'));
+  }
+  return null;
 }
 
 function setDisplayCurrency(cur) {
@@ -10772,6 +10788,39 @@ function initAppLock() {
   showAppLockScreen();
 }
 
+// iOS PWAs (and many desktop tabs) keep sessionStorage alive across a
+// "swipe up to close" — that just backgrounds the app, doesn't kill the
+// page context. Without this, the app would only re-lock after a real
+// reload. We listen for visibilitychange and re-lock if the app was
+// hidden for longer than the grace period.
+const APPLOCK_BACKGROUND_GRACE_MS = 60 * 1000; // 1 minute
+let _appLockHiddenAt = null;
+
+document.addEventListener('visibilitychange', () => {
+  if (!appLockHas()) return;
+  if (document.visibilityState === 'hidden') {
+    _appLockHiddenAt = Date.now();
+  } else if (document.visibilityState === 'visible') {
+    if (_appLockHiddenAt != null) {
+      const elapsed = Date.now() - _appLockHiddenAt;
+      _appLockHiddenAt = null;
+      if (elapsed > APPLOCK_BACKGROUND_GRACE_MS) {
+        sessionStorage.removeItem('spendlens_unlocked');
+        showAppLockScreen();
+      }
+    }
+  }
+});
+
+// pagehide fires on iOS when the user fully closes the PWA process — but
+// also on tab close in regular browsers. Belt-and-suspenders for the
+// case where iOS does evict the session: clear the unlock flag so the
+// next launch hits the lock screen.
+window.addEventListener('pagehide', (e) => {
+  if (e.persisted) return; // bfcache restore — keep unlocked
+  if (appLockHas()) sessionStorage.removeItem('spendlens_unlocked');
+});
+
 // ── PIN setup flow (Settings → Security) ──
 function openPinSetupModal(forEnable) {
   document.getElementById('pinSetupModal').classList.add('open');
@@ -10984,30 +11033,18 @@ function countScheduleOccurrences(s, fromDate, monthsForward) {
  *  over the next `monthsForward` months. Transfers between cash accounts
  *  net to zero so we ignore them. */
 function projectScheduledCashNet(fromDate, monthsForward) {
-  // Guard: when the user already has recurring income declared via the
-  // Income modal (frequency monthly/biweekly/weekly), we skip scheduled
-  // movements with kind='income'. Otherwise a paycheck counted via
-  // getMonthIncome AND a duplicate scheduled income would double, AND a
-  // misclassified Transfer-as-Income (e.g. "$525 → Savings" picked as
-  // Income kind) would inflate the projection by its full amount.
-  // Trade-off: a user who relies *only* on scheduled income for their
-  // paycheck loses that signal in the projection — the breakdown line
-  // surfaces this so it's diagnosable.
-  const hasRecurringIncome = (incomeEntries || []).some(e =>
-    Number(e.amount) > 0 &&
-    (e.frequency === 'monthly' || e.frequency === 'weekly' || e.frequency === 'biweekly')
-  );
+  // Outflows + card payments only. Scheduled INCOME is intentionally
+  // excluded here because getMonthIncome (called from projectCashTrend's
+  // forwardIncome loop) already projects scheduled income via
+  // projectScheduledIncomeForMonth — adding it here too would double the
+  // paycheck. Transfers between cash accounts net to zero.
   let total = 0;
   for (const s of scheduledMovements || []) {
     if (!s.active) continue;
+    if (s.kind === 'income' || s.kind === 'transfer') continue;
     const occ = countScheduleOccurrences(s, fromDate, monthsForward);
     const amt = Number(s.amount) || 0;
-    if (s.kind === 'income') {
-      if (!hasRecurringIncome) total += amt * occ;
-    }
-    else if (s.kind === 'outflow' || s.kind === 'card_payment') total -= amt * occ;
-    // 'transfer' moves cash between two accounts both already in cashOnHand,
-    // so the net effect on total cash is zero — skip.
+    if (s.kind === 'outflow' || s.kind === 'card_payment') total -= amt * occ;
   }
   return total;
 }
