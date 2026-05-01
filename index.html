@@ -2385,6 +2385,13 @@ select.form-input {
 }
 .cf-day {
   min-height: 52px;
+  /* min-width:0 + overflow:hidden override the grid item default of
+     min-width:auto, which lets long event labels (e.g. "WELLS-FARGO",
+     "MICROSOFT") balloon the cell past 1fr and shove the Saturday
+     column off the right edge. With these set, .cf-event's existing
+     ellipsis truncation actually fires. */
+  min-width: 0;
+  overflow: hidden;
   padding: 4px;
   border-radius: 5px;
   background: var(--bg-elev);
@@ -2394,6 +2401,7 @@ select.form-input {
   gap: 1px;
   transition: background 0.18s;
 }
+.cf-event { max-width: 100%; }
 .cf-day.empty { background: transparent; }
 .cf-day.past { opacity: 0.4; }
 .cf-day.today {
@@ -3526,9 +3534,75 @@ select.form-input {
 .sage-budget-apply { background: var(--green); color: #fff; }
 .sage-budget-cancel { background: var(--bg); color: var(--text-dim); border: 1px solid var(--border) !important; }
 
+/* App-lock screen — full-viewport overlay shown on boot when biometric/PIN
+   lock is enabled. z-index sits above every modal so data is hidden while
+   the user authenticates. */
+.app-lock-overlay {
+  position: fixed; inset: 0; z-index: 99999;
+  background: var(--bg); color: var(--text);
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+  padding: 32px 24px; text-align: center;
+  font-family: 'DM Sans', sans-serif;
+}
+.app-lock-overlay.open { display: flex; }
+.app-lock-icon { font-size: 56px; margin-bottom: 18px; }
+.app-lock-title { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+.app-lock-sub { font-size: 13px; color: var(--text-dim); margin-bottom: 28px; }
+.app-lock-pin-row {
+  display: flex; gap: 10px; margin-bottom: 22px;
+}
+.app-lock-pin-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--bg-card); border: 1px solid var(--border-strong);
+}
+.app-lock-pin-dot.filled { background: var(--accent); border-color: var(--accent); }
+.app-lock-keypad {
+  display: grid; grid-template-columns: repeat(3, 64px); gap: 12px; margin-bottom: 18px;
+}
+.app-lock-key {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: var(--bg-card); border: 1px solid var(--border);
+  font-size: 22px; font-weight: 500; color: var(--text);
+  cursor: pointer; transition: background 0.1s;
+  font-family: 'DM Sans', sans-serif;
+}
+.app-lock-key:active { background: var(--bg-card-hover); }
+.app-lock-key.empty { visibility: hidden; }
+.app-lock-key.action { font-size: 14px; font-weight: 600; color: var(--text-dim); }
+.app-lock-error { font-size: 12px; color: var(--red); min-height: 16px; margin-bottom: 10px; }
+.app-lock-bio-btn {
+  padding: 10px 18px; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: transparent; color: var(--text); font-weight: 600; font-size: 13px;
+  cursor: pointer; margin-top: 6px;
+}
+.app-lock-bio-btn:hover { background: var(--bg-card); }
+
 </style>
 </head>
 <body data-theme="light">
+
+<!-- App-lock screen (rendered above everything when locked) -->
+<div class="app-lock-overlay" id="appLockOverlay" role="dialog" aria-modal="true" aria-label="App locked">
+  <div class="app-lock-icon">🔒</div>
+  <div class="app-lock-title">SpendLens is locked</div>
+  <div class="app-lock-sub" id="appLockSub">Enter your PIN</div>
+  <div class="app-lock-pin-row" id="appLockPinDots"></div>
+  <div class="app-lock-error" id="appLockError"></div>
+  <div class="app-lock-keypad" id="appLockKeypad"></div>
+  <button class="app-lock-bio-btn" id="appLockBioBtn" style="display:none" onclick="appLockTryBiometric()">Use Face / Touch ID</button>
+</div>
+
+<!-- PIN setup modal (used by Settings → Security) -->
+<div class="modal-overlay" id="pinSetupModal" onclick="if(event.target===this)closeModal('pinSetupModal')">
+  <div class="modal">
+    <div class="modal-top"><h2 id="pinSetupTitle">Set a PIN</h2><button class="modal-close" onclick="closeModal('pinSetupModal')">✕</button></div>
+    <div id="pinSetupSub" style="font-size:13px;color:var(--text-dim);margin-bottom:14px">Choose a 4–6 digit PIN to unlock the app.</div>
+    <div class="form-group"><label class="form-label">PIN</label><input type="password" class="form-input" id="pinSetupNew" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••"></div>
+    <div class="form-group"><label class="form-label">Confirm PIN</label><input type="password" class="form-input" id="pinSetupConfirm" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="••••"></div>
+    <div id="pinSetupError" style="font-size:12px;color:var(--red);min-height:16px;margin-bottom:10px"></div>
+    <button class="submit-btn" onclick="savePinSetup()">Save PIN</button>
+  </div>
+</div>
 
 <!-- iPhone frame wrapper -->
 <div class="iphone-frame-host">
@@ -3847,6 +3921,12 @@ select.form-input {
 
   <div class="section-title">Gmail Account</div>
   <div id="settingsGmailSection"></div>
+
+  <div class="section-title" style="margin-top:20px">Display</div>
+  <div id="settingsCurrencySection"></div>
+
+  <div class="section-title" style="margin-top:20px">Security</div>
+  <div id="settingsSecuritySection"></div>
 
   <!-- Nightly Auto-Sync -->
   <div class="section-title" style="margin-top:20px">Auto-Sync</div>
@@ -4283,6 +4363,27 @@ select.form-input {
     <div class="form-group"><label class="form-label">Current Balance ($)</label><input type="number" class="form-input" id="setAccountBalanceAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
     <input type="hidden" id="setAccountBalanceId">
     <button class="submit-btn" onclick="saveAccountBalance()">Save Balance</button>
+  </div>
+</div>
+
+<!-- Adjust Account Balance (one-off credit/debit, e.g. friend paid me back) -->
+<div class="modal-overlay" id="adjustAccountBalanceModal" onclick="if(event.target===this)closeModal('adjustAccountBalanceModal')">
+  <div class="modal">
+    <div class="modal-top"><h2>Add / Subtract</h2><button class="modal-close" onclick="closeModal('adjustAccountBalanceModal')">✕</button></div>
+    <div id="adjustAccountBalanceName" style="font-size:13px;color:var(--text-dim);margin-bottom:14px"></div>
+    <div class="form-group">
+      <label class="form-label">Type</label>
+      <div style="display:flex;gap:8px">
+        <button type="button" id="adjustDirIn"  onclick="setAdjustDirection('in')"  style="flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:6px;background:var(--green-soft);color:var(--green);font-weight:600;cursor:pointer">+ Money In</button>
+        <button type="button" id="adjustDirOut" onclick="setAdjustDirection('out')" style="flex:1;padding:10px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text-dim);font-weight:600;cursor:pointer">− Money Out</button>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Amount ($)</label><input type="number" class="form-input" id="adjustAmount" placeholder="0.00" step="0.01" inputmode="decimal"></div>
+    <div class="form-group"><label class="form-label">Category</label><select class="form-input" id="adjustCategory"></select></div>
+    <div class="form-group"><label class="form-label">Date</label><input type="date" class="form-input" id="adjustDate"></div>
+    <div class="form-group"><label class="form-label">Note <span style="color:var(--text-muted);font-weight:400">(optional)</span></label><input type="text" class="form-input" id="adjustNote" placeholder="e.g. Friend paid me back"></div>
+    <input type="hidden" id="adjustAccountId">
+    <button class="submit-btn" onclick="saveAdjustAccountBalance()">Save</button>
   </div>
 </div>
 
@@ -4728,6 +4829,26 @@ let incomeEntries = [];
 let savingsGoals = [];
 let cardBalances = {};
 let scheduledMovements = []; // [{id, kind, sourceAccountId, targetAccountId, cardId, amount, dayOfMonth, label, note, active, autoApply, lastAppliedPeriod}]
+let balanceAdjustments = []; // [{id, accountId, direction:'in'|'out', amount, category, note, adjustedAt, createdAt}] — audit trail for the +/- modal
+// Display-only currency. All stored amounts are USD; this only changes how
+// they render. Toggle lives in Settings, persisted via user_preferences.
+let displayCurrency = 'USD'; // 'USD' | 'INR'
+let usdInrRate = null;       // null until first fetch / load from cloud
+let usdInrRateFetchedAt = null; // ISO string
+const ADJUSTMENT_CATEGORIES = [
+  { id: 'friend_payment',    label: 'Friend payment'    },
+  { id: 'loan_payment',      label: 'Loan payment'      },
+  { id: 'loan_disbursement', label: 'Loan disbursement' },
+  { id: 'refund',            label: 'Refund'            },
+  { id: 'reimbursement',     label: 'Reimbursement'     },
+  { id: 'gift_received',     label: 'Gift received'     },
+  { id: 'gift_given',        label: 'Gift given'        },
+  { id: 'fee',               label: 'Fee'               },
+  { id: 'interest_earned',   label: 'Interest earned'   },
+  { id: 'cash_deposit',      label: 'Cash deposit'      },
+  { id: 'cash_withdrawal',   label: 'Cash withdrawal'   },
+  { id: 'other',             label: 'Other'             },
+];
 let nextIncomeId = 1;
 let nextGoalId = 1;
 let debtStrategy = 'avalanche';
@@ -4763,6 +4884,10 @@ let yesterdayDismissedDate = '';
 // INIT
 // ============================================================
 function init() {
+  // App lock runs first so the user authenticates before any data renders.
+  // initAppLock is a no-op when lock is disabled or already unlocked this
+  // session, so the normal boot path is unaffected.
+  if (typeof initAppLock === 'function') initAppLock();
   loadFromStorage();
   if (CARDS.length === 0) {
     // Default cards
@@ -4819,6 +4944,8 @@ function loadFromStorage() {
       savingsGoals = d.savingsGoals || [];
       cardBalances = d.cardBalances || {};
       scheduledMovements = d.scheduledMovements || [];
+      balanceAdjustments = d.balanceAdjustments || [];
+      if (d.displayCurrency === 'USD' || d.displayCurrency === 'INR') displayCurrency = d.displayCurrency;
       nextIncomeId = d.nextIncomeId || 1;
       nextGoalId = d.nextGoalId || 1;
       prunePayments(); // drop logged payments older than 30d (except ones still needed for balance calc)
@@ -4861,7 +4988,8 @@ function saveToLocalStorage() {
       processedPaymentEmailIds: [...processedPaymentEmailIds],
       gmailUser, merchantRules, nightlySyncEnabled, yesterdayDismissed, yesterdayDismissedDate,
       cardPayments, incomeEntries, savingsGoals, cardBalances,
-      scheduledMovements,
+      scheduledMovements, balanceAdjustments,
+      displayCurrency,
       nextIncomeId, nextGoalId,
     }));
   } catch(e) {}
@@ -4885,6 +5013,7 @@ function _emptyCloudDeletes() {
     transactions: [], cards: [], subscriptions: [], card_payments: [],
     income_entries: [], savings_goals: [], sync_history: [],
     scheduled_movements: [],
+    balance_adjustments: [],
     card_balances: [],     // [{card_id}]
     budgets: [],           // [{key}]
     merchant_rules: [],    // [{merchant_key}]
@@ -5086,6 +5215,7 @@ async function onSupabaseSignIn(session) {
   // Apply any auto-flagged scheduled movements that are due this period.
   // Must run AFTER loadFromCloud so we have the latest last_applied_period
   // values, otherwise we'd risk firing a movement twice in one period.
+  if (typeof _migrateScheduledIncomeSource === 'function') _migrateScheduledIncomeSource();
   if (typeof applyAutoSchedules === 'function') applyAutoSchedules();
   // L4: also run every 6 hours while the PWA is open so a tab left
   // running across midnight (1st of the month, etc.) catches the new
@@ -5096,6 +5226,9 @@ async function onSupabaseSignIn(session) {
       try { applyAutoSchedules(); } catch (e) { console.warn('[auto-apply tick] failed', e); }
     }, 6 * 60 * 60 * 1000);
   }
+  // Refresh FX rate if the cached one is stale (>24h). Fire-and-forget; the
+  // helper triggers a re-render when it lands so totals don't lag.
+  if (typeof refreshFxRates === 'function') refreshFxRates(false);
   renderAll();
 
   // CRITICAL: flush any pending work from before sign-in (offline edits,
@@ -5183,7 +5316,7 @@ async function handleGmailSync() {
 async function loadFromCloud() {
   if (!currentUserId) return;
   try {
-    const [cardsData, txsData, subsData, paysData, balsData, budsData, incData, goalsData, rulesData, histData, procData, prefsData, schedData] = await Promise.all([
+    const [cardsData, txsData, subsData, paysData, balsData, budsData, incData, goalsData, rulesData, histData, procData, prefsData, schedData, adjData] = await Promise.all([
       sbSelect('cards',               'select=*&order=created_at'),
       sbSelect('transactions',        'select=*&order=tx_date.desc&limit=5000'),
       sbSelect('subscriptions',       'select=*'),
@@ -5197,6 +5330,7 @@ async function loadFromCloud() {
       sbSelect('processed_emails',    'select=*'),
       sbSelect('user_preferences',    `select=*&user_id=eq.${currentUserId}&limit=1`),
       sbSelect('scheduled_movements', 'select=*&order=created_at'),
+      sbSelect('balance_adjustments', 'select=*&order=adjusted_at.desc&limit=2000'),
     ]);
 
     CARDS = (cardsData || []).map(c => ({
@@ -5274,6 +5408,16 @@ async function loadFromCloud() {
       icon: g.icon, color: g.color,
       createdAt: (g.created_at || '').split('T')[0],
     }));
+    balanceAdjustments = (adjData || []).map(a => ({
+      id: a.id,
+      accountId: a.account_id,
+      direction: a.direction,
+      amount: Number(a.amount),
+      category: a.category,
+      note: a.note || null,
+      adjustedAt: a.adjusted_at,
+      createdAt: a.created_at,
+    }));
     merchantRules = {};
     (rulesData || []).forEach(r => { merchantRules[r.merchant_key] = r.category; });
     syncHistory = (histData || []).map(h => ({
@@ -5291,6 +5435,21 @@ async function loadFromCloud() {
       yesterdayDismissed = !!prefs.yesterday_dismissed;
       yesterdayDismissedDate = prefs.yesterday_dismissed_date || '';
       debtStrategy = prefs.debt_strategy || debtStrategy;
+      if (prefs.display_currency === 'USD' || prefs.display_currency === 'INR') {
+        displayCurrency = prefs.display_currency;
+      }
+      // Prefer the cloud-cached rate if it's newer than what we have locally.
+      const cloudFetchedMs = prefs.usd_inr_rate_fetched_at ? Date.parse(prefs.usd_inr_rate_fetched_at) : 0;
+      const localFetchedMs = usdInrRateFetchedAt ? Date.parse(usdInrRateFetchedAt) : 0;
+      if (Number.isFinite(Number(prefs.usd_inr_rate)) && cloudFetchedMs > localFetchedMs) {
+        usdInrRate = Number(prefs.usd_inr_rate);
+        usdInrRateFetchedAt = prefs.usd_inr_rate_fetched_at;
+        try {
+          localStorage.setItem(FX_RATE_CACHE_KEY, JSON.stringify({
+            rate: usdInrRate, fetchedAt: usdInrRateFetchedAt,
+          }));
+        } catch (e) {}
+      }
     }
     saveToLocalStorage();
   } catch (e) {
@@ -5475,6 +5634,7 @@ async function flushToCloud() {
   const dProc = take('processed_emails');
   const dC = take('cards');
   const dSched = take('scheduled_movements');
+  const dAdj = take('balance_adjustments');
   const dHist = take('sync_history');
   const deleteJobs = [];
   if (dT.length)    deleteJobs.push(sbDeleteIn('transactions', 'id', dT));
@@ -5483,6 +5643,7 @@ async function flushToCloud() {
   if (dI.length)    deleteJobs.push(sbDeleteIn('income_entries', 'id', dI));
   if (dG.length)    deleteJobs.push(sbDeleteIn('savings_goals', 'id', dG));
   if (dSched.length)deleteJobs.push(sbDeleteIn('scheduled_movements', 'id', dSched));
+  if (dAdj.length)  deleteJobs.push(sbDeleteIn('balance_adjustments', 'id', dAdj));
   if (dHist.length) deleteJobs.push(sbDeleteIn('sync_history', 'id', dHist));
   for (const b of dBud)  deleteJobs.push(sbDeleteEq('budgets',        { user_id: uid, key: b.key }));
   for (const b of dBal)  deleteJobs.push(sbDeleteEq('card_balances',  { user_id: uid, card_id: b.card_id }));
@@ -5503,6 +5664,7 @@ async function flushToCloud() {
       cloudDeletes.income_entries.push(...dI);
       cloudDeletes.savings_goals.push(...dG);
       cloudDeletes.scheduled_movements.push(...dSched);
+      cloudDeletes.balance_adjustments.push(...dAdj);
       cloudDeletes.sync_history.push(...dHist);
       cloudDeletes.cards.push(...dC);
       cloudDeletes.budgets.push(...dBud);
@@ -5541,6 +5703,12 @@ async function flushToCloud() {
     auto_apply: !!s.autoApply,
     last_applied_period: s.lastAppliedPeriod || null,
   }));
+  const adjRows = balanceAdjustments.map(a => ({
+    id: a.id, user_id: uid, account_id: a.accountId,
+    direction: a.direction, amount: Number(a.amount),
+    category: a.category, note: a.note || null,
+    adjusted_at: a.adjustedAt,
+  }));
   const goalRows = savingsGoals.map(g => ({
     id: g.id, user_id: uid, name: g.name, target: Number(g.target),
     saved_so_far: Number(g.savedSoFar) || 0, deadline: g.deadline || null,
@@ -5572,11 +5740,15 @@ async function flushToCloud() {
     upsertChunked('sync_history', histRows, 'id'),
     upsertChunked('processed_emails', procRows, 'user_id,email_id,kind'),
     upsertChunked('scheduled_movements', schedRows, 'id'),
+    upsertChunked('balance_adjustments', adjRows, 'id'),
     sbUpsert('user_preferences', [{
       user_id: uid, theme: document.body.dataset.theme || 'light',
       debt_strategy: debtStrategy, nightly_sync_enabled: !!nightlySyncEnabled,
       yesterday_dismissed: !!yesterdayDismissed,
       yesterday_dismissed_date: yesterdayDismissedDate || null,
+      display_currency: displayCurrency || 'USD',
+      usd_inr_rate: Number.isFinite(usdInrRate) ? usdInrRate : null,
+      usd_inr_rate_fetched_at: usdInrRateFetchedAt || null,
     }], 'user_id'),
   ]);
   console.log('[flush] Tier A complete');
@@ -5793,7 +5965,7 @@ function showYesterdaySummary() {
   if (yTx.length === 0) return;
   const yTotal = yTx.reduce((s,tx) => s + tx.amount, 0);
   const banner = document.getElementById('yesterdayBanner');
-  document.getElementById('yesterdayAmount').textContent = '$' + yTotal.toLocaleString('en-US',{minimumFractionDigits:2});
+  document.getElementById('yesterdayAmount').textContent = fmtMoney(yTotal);
   document.getElementById('yesterdayDetail').textContent = `${yTx.length} transaction${yTx.length>1?'s':''} on ${yesterday.toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}`;
   banner.classList.add('visible');
 }
@@ -6456,7 +6628,7 @@ function openReassignModal(txId) {
         <button class="modal-close" onclick="document.getElementById('reassignOverlay').remove()">✕</button>
       </div>
       <div style="font-size:13px;color:var(--text-dim);margin-bottom:16px">
-        <strong style="color:var(--text)">${tx.merchant}</strong> — $${tx.amount.toFixed(2)}<br>
+        <strong style="color:var(--text)">${tx.merchant}</strong> — ${fmtMoney(tx.amount)}<br>
         Currently: <span style="color:var(--accent)">${CATEGORIES.find(c=>c.id===tx.category)?.icon} ${CATEGORIES.find(c=>c.id===tx.category)?.name||'Other'}</span>
       </div>
       <div class="form-label">Change Category</div>
@@ -6749,7 +6921,7 @@ function saveBudget() {
   closeModal('setBudgetModal');
   renderAll();
   renderBudgets();
-  showSyncBar('success', '🎯', `Budget set: $${amount.toLocaleString()}/month`);
+  showSyncBar('success', '🎯', `Budget set: ${fmtMoney(amount, {decimals: 0})}/month`);
 }
 
 function renderBudgets() {
@@ -6786,14 +6958,14 @@ function renderBudgets() {
     }
     const pct = Math.min((spent/limit)*100, 100);
     const remaining = limit - spent;
-    const status = remaining > 0 ? `$${remaining.toFixed(0)} remaining` : `$${Math.abs(remaining).toFixed(0)} over budget!`;
+    const status = remaining > 0 ? `${fmtMoney(remaining, {decimals: 0})} remaining` : `${fmtMoney(Math.abs(remaining), {decimals: 0})} over budget!`;
     const barClass = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : '';
     const barColor = pct >= 100 ? 'var(--red)' : pct >= 80 ? 'var(--amber)' : color;
 
     return `<div class="budget-card">
       <div class="budget-header">
         <div class="budget-card-name">${icon} ${label}</div>
-        <div class="budget-amounts"><span class="budget-spent" style="color:${pct>=100?'var(--red)':'var(--text)'}">$${spent.toFixed(0)}</span><span class="budget-limit">/ $${limit.toLocaleString()}</span></div>
+        <div class="budget-amounts"><span class="budget-spent" style="color:${pct>=100?'var(--red)':'var(--text)'}">${fmtMoney(spent, {decimals: 0})}</span><span class="budget-limit">/ ${fmtMoney(limit, {decimals: 0})}</span></div>
       </div>
       <div class="budget-bar"><div class="budget-bar-fill ${barClass}" style="width:${pct}%;background:${barColor}"></div></div>
       <div class="budget-status" style="display:flex;justify-content:space-between">
@@ -6818,8 +6990,8 @@ function renderTotalBudgetProgress(total) {
   el.style.display = 'block';
   const limit = budgets.overall;
   const pct = Math.min((total/limit)*100, 100);
-  document.getElementById('budgetSpentLabel').textContent = `$${total.toFixed(0)} spent`;
-  document.getElementById('budgetLimitLabel').textContent = `$${limit.toLocaleString()} budget`;
+  document.getElementById('budgetSpentLabel').textContent = `${fmtMoney(total, {decimals: 0})} spent`;
+  document.getElementById('budgetLimitLabel').textContent = `${fmtMoney(limit, {decimals: 0})} budget`;
   const fill = document.getElementById('budgetProgressFill');
   fill.style.width = pct + '%';
   fill.className = 'budget-progress-fill' + (pct >= 100 ? ' over' : pct >= 80 ? ' warn' : '');
@@ -6840,8 +7012,8 @@ function renderSubscriptions() {
   const totalMonthly = active.reduce((s,sub) => s + (sub.cycle === 'yearly' ? sub.amount/12 : sub.amount), 0);
   el.innerHTML = `<div class="insight-card" style="margin-bottom:14px">
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <div><div class="insight-title">Monthly Subscription Cost</div><div class="insight-value">$${totalMonthly.toFixed(2)}</div></div>
-      <div style="text-align:right"><div style="font-size:12px;color:var(--text-dim)">Yearly</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;color:var(--amber)">$${(totalMonthly*12).toFixed(0)}</div></div>
+      <div><div class="insight-title">Monthly Subscription Cost</div><div class="insight-value">${fmtMoney(totalMonthly)}</div></div>
+      <div style="text-align:right"><div style="font-size:12px;color:var(--text-dim)">Yearly</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;color:var(--amber)">${fmtMoney((totalMonthly*12), {decimals: 0})}</div></div>
     </div>
   </div>` +
   active.map(sub => {
@@ -6861,7 +7033,7 @@ function renderSubscriptions() {
         <div class="sub-name">${sub.name} ${sub.autoDetected?'<span class="tx-sub-badge">Auto</span>':''}${postedThisMonth?'<span class="tx-sub-badge" style="background:rgba(0,210,160,0.15);color:var(--green)">✓ Posted</span>':''}</div>
         <div class="sub-meta">${card?.name||'Unknown'} · ${sub.cycle}${dayLabel}</div>
       </div>
-      <div class="sub-amount">$${sub.amount.toFixed(2)}<span style="font-size:11px;color:var(--text-muted)">/${sub.cycle==='yearly'?'yr':'mo'}</span></div>
+      <div class="sub-amount">${fmtMoney(sub.amount)}<span style="font-size:11px;color:var(--text-muted)">/${sub.cycle==='yearly'?'yr':'mo'}</span></div>
       <div class="sub-actions">
         <button class="sub-action-btn cancel" onclick="cancelSubscription('${sub.id}')">✕</button>
       </div>
@@ -7000,9 +7172,9 @@ function renderOptimizer() {
   const missed = optimalRewards - currentRewards;
   document.getElementById('optimizerSavings').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center">
-      <div><div class="insight-title">You're earning</div><div class="insight-value" style="color:var(--green)">$${currentRewards.toFixed(2)}</div><div class="insight-note">in rewards this month</div></div>
-      <div style="text-align:right"><div style="font-size:12px;color:var(--text-dim)">Could earn</div><div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:var(--amber)">$${optimalRewards.toFixed(2)}</div>
-      ${missed > 1 ? `<div style="font-size:12px;color:var(--red);margin-top:2px">Missing $${missed.toFixed(2)}</div>` : '<div style="font-size:12px;color:var(--green);margin-top:2px">Optimized!</div>'}
+      <div><div class="insight-title">You're earning</div><div class="insight-value" style="color:var(--green)">${fmtMoney(currentRewards)}</div><div class="insight-note">in rewards this month</div></div>
+      <div style="text-align:right"><div style="font-size:12px;color:var(--text-dim)">Could earn</div><div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:var(--amber)">${fmtMoney(optimalRewards)}</div>
+      ${missed > 1 ? `<div style="font-size:12px;color:var(--red);margin-top:2px">Missing ${fmtMoney(missed)}</div>` : '<div style="font-size:12px;color:var(--green);margin-top:2px">Optimized!</div>'}
       </div>
     </div>`;
 }
@@ -7074,7 +7246,7 @@ function selectCategory(catId) {
 
 function renderTotal(f) {
   const t = f.reduce((s,tx) => s+tx.amount, 0);
-  document.getElementById('totalAmount').textContent = '$'+t.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  document.getElementById('totalAmount').textContent = fmtMoney(t);
   document.getElementById('txCount').textContent = f.length;
   renderTotalBudgetProgress(t);
 }
@@ -7086,7 +7258,7 @@ function renderCards() {
   
   let h = `<div class="card-chip ${selectedCard==='all'?'active':''}" data-card="all" onclick="selectCard('all')">
     <div class="card-name">All Cards</div><div class="card-last4">Combined</div>
-    <div class="card-amount">$${allTotal.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+    <div class="card-amount">${fmtMoney(allTotal)}</div>
     <div class="card-count">${allTx.length} transactions</div></div>`;
 
   CARDS.forEach(card => {
@@ -7098,7 +7270,7 @@ function renderCards() {
     h += `<div class="card-chip ${selectedCard===card.id?'active':''}" data-card="${card.id}" onclick="selectCard('${card.id}')" style="--card-color:${card.color}">
       <style>.card-chip[data-card="${card.id}"]::before{background:${card.color}}</style>
       <div class="card-name">${card.name}</div><div class="card-last4">•••• ${card.last4}</div>
-      <div class="card-amount">$${ct.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+      <div class="card-amount">${fmtMoney(ct)}</div>
       <div class="card-count">${ctx.length} transactions</div>
       ${budget ? `<div class="card-budget-mini"><div class="card-budget-mini-fill" style="width:${pct}%;background:${barColor}"></div></div>` : ''}
     </div>`;
@@ -7150,7 +7322,7 @@ function renderTrendChart() {
         plugins: { legend: { display: false } },
         scales: {
           x: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 12, family: 'DM Sans' } } },
-          y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 11, family: 'JetBrains Mono' }, callback: v => '$' + v.toLocaleString() } }
+          y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 11, family: 'JetBrains Mono' }, callback: v => fmtMoney(v, {decimals: 0}) } }
         }
       }
     });
@@ -7160,7 +7332,7 @@ function renderTrendChart() {
     })).filter(ds => ds.data.some(v=>v>0));
     trendChart = new Chart(ctx,{type:'bar',data:{labels:months.map(m=>m.label),datasets},
       options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#7a7a90',font:{size:10,family:'DM Sans'},boxWidth:10,padding:8}}},
-        scales:{x:{stacked:true,grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:12,family:'DM Sans'}}},y:{stacked:true,grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:11,family:'JetBrains Mono'},callback:v=>'$'+v.toLocaleString()}}}}});
+        scales:{x:{stacked:true,grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:12,family:'DM Sans'}}},y:{stacked:true,grid:{color:'rgba(42,42,58,0.3)'},ticks:{color:'#7a7a90',font:{size:11,family:'JetBrains Mono'},callback:v=>fmtMoney(v, {decimals: 0})}}}}});
   }
 }
 
@@ -7199,7 +7371,7 @@ function renderDailyChart(f) {
         pointHoverRadius: 5,
       }]
     },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' } } }, y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' }, callback: v => '$' + v } } } }
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' } } }, y: { grid: { color: 'rgba(42,42,58,0.3)' }, ticks: { color: '#7a7a90', font: { size: 10, family: 'JetBrains Mono' }, callback: v => fmtMoney(v, {decimals: 0}) } } } }
   });
 }
 
@@ -7213,7 +7385,7 @@ function renderCategories(f) {
     const sel = selectedCategory === cat.id ? ' selected' : '';
     return `<div class="cat-card${sel}" onclick="selectCategory('${cat.id}')" role="button" tabindex="0">
       <div class="cat-icon">${cat.icon}</div><div class="cat-name">${cat.name}</div>
-      <div class="cat-amount">$${t.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+      <div class="cat-amount">${fmtMoney(t)}</div>
       <div class="cat-bar"><div class="cat-bar-fill" style="width:${p}%;background:${cat.color}"></div></div></div>`;
   }).join('');
 }
@@ -7259,7 +7431,7 @@ function renderTransactions(f) {
           </div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
-          <div class="tx-amount" style="color:var(--red)">-$${tx.amount.toFixed(2)}</div>
+          <div class="tx-amount" style="color:var(--red)">-${fmtMoney(tx.amount)}</div>
           <div style="font-size:10px;color:var(--text-muted)">${cat.icon} Edit</div>
         </div></div>`;
     }).join('')}</div>`;
@@ -7286,10 +7458,10 @@ function renderInsights(f) {
   const topM = Object.entries(merchants).sort((a,b)=>b[1]-a[1])[0];
   const gmailCount = f.filter(tx=>tx.source==='gmail').length;
   c.innerHTML = `
-    <div class="insight-card"><div class="insight-title">Average Per Transaction</div><div class="insight-value">$${avg.toFixed(2)}</div><div class="insight-note">Across ${f.length} transactions</div></div>
-    <div class="insight-card"><div class="insight-title">Daily Average</div><div class="insight-value">$${(total/daysInMonth).toFixed(2)}</div><div class="insight-note">Based on ${daysInMonth} days</div></div>
-    <div class="insight-card"><div class="insight-title">Largest Transaction</div><div class="insight-value">$${max.toFixed(2)}</div><div class="insight-note">${maxTx?maxTx.merchant:'N/A'}</div></div>
-    <div class="insight-card"><div class="insight-title">Top Merchant</div><div class="insight-value">${topM?topM[0]:'N/A'}</div><div class="insight-note">${topM?'$'+topM[1].toFixed(2)+' total':''}</div></div>
+    <div class="insight-card"><div class="insight-title">Average Per Transaction</div><div class="insight-value">${fmtMoney(avg)}</div><div class="insight-note">Across ${f.length} transactions</div></div>
+    <div class="insight-card"><div class="insight-title">Daily Average</div><div class="insight-value">${fmtMoney((total/daysInMonth))}</div><div class="insight-note">Based on ${daysInMonth} days</div></div>
+    <div class="insight-card"><div class="insight-title">Largest Transaction</div><div class="insight-value">${fmtMoney(max)}</div><div class="insight-note">${maxTx?maxTx.merchant:'N/A'}</div></div>
+    <div class="insight-card"><div class="insight-title">Top Merchant</div><div class="insight-value">${topM?topM[0]:'N/A'}</div><div class="insight-note">${topM?fmtMoney(topM[1])+' total':''}</div></div>
     ${gmailCount>0?`<div class="insight-card"><div class="insight-title">📧 Auto-Imported from Gmail</div><div class="insight-value">${gmailCount}</div><div class="insight-note">of ${f.length} total transactions this month</div></div>`:''}`;
   const pCtx = document.getElementById('pieChart').getContext('2d');
   if (pieChart) pieChart.destroy();
@@ -7368,7 +7540,7 @@ function parseSMS() {
   selectedCatInModal=autoCat;
   document.querySelectorAll('#catSelectGroup .cat-select-btn').forEach(btn=>{const matchCat=CATEGORIES.find(c=>c.id===autoCat);btn.classList.toggle('selected',matchCat&&btn.textContent.trim().toLowerCase().includes(matchCat.name.toLowerCase()));});
   const preview=document.getElementById('parsedPreview');preview.classList.add('visible');
-  document.getElementById('parsedAmount').textContent=amount?'$'+amount.toFixed(2):'Not found';
+  document.getElementById('parsedAmount').textContent=amount?fmtMoney(amount):'Not found';
   document.getElementById('parsedMerchant').textContent=merchant||'Not found';
   document.getElementById('parsedCard').textContent=cardId?CARDS.find(c=>c.id===cardId)?.name||cardId:'Not detected';
   document.getElementById('parsedDate').textContent=date||'Not found';
@@ -7440,7 +7612,7 @@ function showPage(id, btn) {
   document.querySelector(`.sp-item[data-page="${id}"]`)?.classList.add('active');
   if(id==='pageOptimizer'){renderInsights(getFiltered());renderOptimizer();}
   if(id==='pageBudget'){renderBudgets();renderSubscriptions();}
-  if(id==='pageSettings'){renderSettingsGmailSection();renderSyncHistory();renderSettingsCards();updateNightlySyncUI();}
+  if(id==='pageSettings'){renderSettingsGmailSection();renderSyncHistory();renderSettingsCards();updateNightlySyncUI();renderSettingsCurrencySection();renderSettingsSecuritySection();}
   if(id==='pageFinance') renderFinanceHub();
   if(id==='pageCashFlow') renderCashFlowCalendar();
   if(id==='pageGoals') renderGoals();
@@ -7542,7 +7714,7 @@ function openEditCardModal(cardId) {
   const colors=['#006fcf','#d03027','#d71e28','#ff6000','#1a6dcc','#003B70','#BE1E2D','#012169','#6c5ce7','#00d2a0','#e64980','#ff922b','#ffd43b','#51cf66','#868e96'];
   const swatches=colors.map(c=>`<div id="esw-${c.replace('#','')}" onclick="pickEditColor('${c}')" style="width:26px;height:26px;border-radius:6px;background:${c};cursor:pointer;border:2px solid ${c===card.color?'white':'transparent'};flex-shrink:0"></div>`).join('');
   const payments=(cardPayments?.[cardId]||[]).slice(0,3);
-  const pHtml=payments.length?payments.map(p=>`<div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid var(--border)"><span style="color:var(--text-dim)">${p.date} ${p.source==='gmail'?'📧':'✏️'}</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">+$${p.amount.toFixed(2)}</span></div>`).join(''):'<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No payments logged</div>';
+  const pHtml=payments.length?payments.map(p=>`<div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid var(--border)"><span style="color:var(--text-dim)">${p.date} ${p.source==='gmail'?'📧':'✏️'}</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">+${fmtMoney(p.amount)}</span></div>`).join(''):'<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No payments logged</div>';
   const overlay=document.createElement('div');
   overlay.className='modal-overlay open'; overlay.id='editCardOverlay';
   overlay.onclick=(e)=>{if(e.target===overlay)overlay.remove();};
@@ -7595,7 +7767,13 @@ function savePayment(cardId,source,amount=null,date=null){
   if(!cardPayments)cardPayments={};
   if(!cardPayments[cardId])cardPayments[cardId]=[];
   const exists=cardPayments[cardId].some(p=>p.date===payDate&&Math.abs(p.amount-payAmt)<0.01);
-  if(!exists){cardPayments[cardId].unshift({id:crypto.randomUUID(),date:payDate,amount:payAmt,source});if(cardPayments[cardId].length>20)cardPayments[cardId].pop();prunePayments();saveToStorage();showSyncBar('success','✅',`Payment of <strong>$${payAmt.toFixed(2)}</strong> recorded`);}
+  if(!exists){
+    const sourceAccountId = source === 'manual' ? getDefaultCashAccountId() : null;
+    cardPayments[cardId].unshift({id:crypto.randomUUID(),date:payDate,amount:payAmt,source,sourceAccountId});
+    if(cardPayments[cardId].length>20)cardPayments[cardId].pop();
+    if(sourceAccountId) adjustAccountBalance(sourceAccountId, -payAmt);
+    prunePayments();saveToStorage();showSyncBar('success','✅',`Payment of <strong>${fmtMoney(payAmt)}</strong> recorded`);
+  }
   document.getElementById('logPaymentOverlay')?.remove();
 }
 
@@ -7618,7 +7796,7 @@ function openIncomeModal(){
   if (dstSel) {
     const accounts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
     dstSel.innerHTML = '<option value="">— No account selected —</option>'
-      + accounts.map(a => `<option value="${a.id}">${a.name} ($${(cardBalances[a.id]?.statementBalance || 0).toFixed(2)})</option>`).join('');
+      + accounts.map(a => `<option value="${a.id}">${a.name} (${fmtMoney((cardBalances[a.id]?.statementBalance || 0))})</option>`).join('');
   }
   document.getElementById('incomeAmount').value='';
   document.getElementById('incomeNote').value='';
@@ -7647,7 +7825,7 @@ function saveIncome(){
   if (destinationAccountId && frequency === 'once') adjustAccountBalance(destinationAccountId, +amount);
   saveToStorage(); closeModal('addIncomeModal'); renderFinanceHub();
   if (typeof renderAccountsPage === 'function') renderAccountsPage();
-  showSyncBar('success','💵',`Income of <strong>$${amount.toLocaleString()}</strong> logged`);
+  showSyncBar('success','💵',`Income of <strong>${fmtMoney(amount, {decimals: 0})}</strong> logged`);
 }
 
 function deleteIncome(id){
@@ -7667,7 +7845,7 @@ function deleteIncome(id){
 function getMonthIncome(year,month){
   const now=new Date();
   const monthPrefix = `${year}-${String(month+1).padStart(2,'0')}`;
-  return incomeEntries.filter(e=>{
+  const fromEntries = incomeEntries.filter(e=>{
     if(e.frequency==='once') return e.date && e.date.startsWith(monthPrefix);
     // Recurring entries should only show in months on or after the
     // entry's start date — otherwise a paycheck added today would
@@ -7683,6 +7861,72 @@ function getMonthIncome(year,month){
     if(e.frequency==='weekly') return s+(e.amount*4.33);
     return s+e.amount;
   },0);
+  return fromEntries + projectScheduledIncomeForMonth(year, month);
+}
+
+// Project income that hasn't been deposited yet but will fire later this
+// month from active income schedules. Already-fired ones are in
+// incomeEntries above. We only add fires strictly AFTER today (PT) so we
+// don't double-count today's deposit if the user is viewing the dashboard
+// after the auto-apply ran.
+function projectScheduledIncomeForMonth(year, month) {
+  const todayStr = ptDateStr();
+  const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const lastDay = new Date(year, month + 1, 0).getDate();
+  const monthEndStr = `${monthPrefix}-${String(lastDay).padStart(2, '0')}`;
+  if (monthEndStr < todayStr) return 0;
+  let total = 0;
+  for (const s of (scheduledMovements || [])) {
+    if (s.kind !== 'income' || !s.active) continue;
+    const amt = Number(s.amount) || 0;
+    if (amt <= 0) continue;
+    const freq = s.frequency || 'monthly';
+    if (freq === 'monthly') {
+      const day = Math.min(s.dayOfMonth || 1, lastDay);
+      const fireStr = `${monthPrefix}-${String(day).padStart(2, '0')}`;
+      if (fireStr > todayStr) total += amt;
+    } else if (freq === 'weekly') {
+      const targetDow = s.dayOfWeek == null ? 5 : Number(s.dayOfWeek);
+      for (let day = 1; day <= lastDay; day++) {
+        const d = new Date(year, month, day);
+        if (d.getDay() !== targetDow) continue;
+        const fireStr = `${monthPrefix}-${String(day).padStart(2, '0')}`;
+        if (fireStr > todayStr) total += amt;
+      }
+    }
+  }
+  return total;
+}
+
+// One-time retag: existing scheduled-income entries created before this
+// fix carry source='other'. Match them against active income schedules by
+// label+amount and switch them to 'salary' so they group correctly in the
+// Finance Hub. Idempotent — runs every load but only mutates rows it
+// hasn't touched yet.
+function _migrateScheduledIncomeSource() {
+  if (!Array.isArray(scheduledMovements) || !Array.isArray(incomeEntries)) return;
+  const labelKey = new Map();
+  for (const s of scheduledMovements) {
+    if (s.kind !== 'income') continue;
+    const cents = Math.round((Number(s.amount) || 0) * 100);
+    labelKey.set(`${s.label}|${cents}`, true);
+  }
+  if (labelKey.size === 0) return;
+  let migrated = 0;
+  for (const e of incomeEntries) {
+    if (e.source !== 'other') continue;
+    if (e.frequency !== 'once') continue;
+    if (!e.note) continue;
+    const cents = Math.round((Number(e.amount) || 0) * 100);
+    if (labelKey.has(`${e.note}|${cents}`)) {
+      e.source = 'salary';
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    try { saveToStorage(); } catch (err) {}
+    console.log(`[migrate] Retagged ${migrated} scheduled-income entries as 'salary'`);
+  }
 }
 
 // Get recurring income entries for calendar display
@@ -7730,12 +7974,12 @@ function renderFinanceHub(){
     const rc=savingsRate>=20?'var(--green)':savingsRate>=10?'var(--amber)':'var(--red)';
     const rcls=savingsRate>=20?'':savingsRate>=10?' warn':' bad';
     hero.innerHTML=`<div class="fin-hero-row">
-      <div class="fin-hero-item"><div class="fin-hero-label">Income</div><div class="fin-hero-value" style="color:var(--green)">${totalIncome>0?'$'+totalIncome.toLocaleString('en-US',{minimumFractionDigits:0}):'—'}</div><div class="fin-hero-sub">${totalIncome>0?'This month':'Tap + to add'}</div></div>
-      <div class="fin-hero-item"><div class="fin-hero-label">Spent</div><div class="fin-hero-value" style="color:var(--red)">$${totalSpent.toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="fin-hero-sub">${f.length} transactions</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Income</div><div class="fin-hero-value" style="color:var(--green)">${totalIncome>0?fmtMoney(totalIncome, {decimals: 0}):'—'}</div><div class="fin-hero-sub">${totalIncome>0?'This month':'Tap + to add'}</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Spent</div><div class="fin-hero-value" style="color:var(--red)">${fmtMoney(totalSpent, {decimals: 0})}</div><div class="fin-hero-sub">${f.length} transactions</div></div>
     </div>
     <div class="fin-divider"></div>
     <div class="fin-hero-row">
-      <div class="fin-hero-item"><div class="fin-hero-label">Net Savings</div><div class="fin-hero-value" style="color:${savings>=0?'var(--green)':'var(--red)'}">${savings>=0?'+':'-'}$${Math.abs(savings).toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="fin-hero-sub">${savings>=0?'Saved 🎉':'Over budget'}</div></div>
+      <div class="fin-hero-item"><div class="fin-hero-label">Net Savings</div><div class="fin-hero-value" style="color:${savings>=0?'var(--green)':'var(--red)'}">${savings>=0?'+':'-'}${fmtMoney(Math.abs(savings), {decimals: 0})}</div><div class="fin-hero-sub">${savings>=0?'Saved 🎉':'Over budget'}</div></div>
       <div class="fin-hero-item"><div class="fin-hero-label">Savings Rate</div><div class="fin-hero-value" style="color:${rc}">${totalIncome>0?savingsRate.toFixed(1)+'%':'—'}</div><div class="fin-hero-sub">${savingsRate>=20?'Excellent 🌟':savingsRate>=10?'Good':savingsRate>0?'Try for 20%':'Log income first'}</div></div>
     </div>
     ${totalIncome>0?`<div class="savings-rate-bar"><div class="savings-rate-fill${rcls}" style="width:${Math.min(savingsRate,100)}%"></div></div>`:''}`;
@@ -7750,7 +7994,7 @@ function renderFinanceHub(){
       return e.date && e.date.startsWith(incMonthPrefix);
     });
     if(!entries.length){incEl.innerHTML=`<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius-sm)">No income logged. Tap + to add.</div>`;}
-    else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+$${e.amount.toLocaleString('en-US',{minimumFractionDigits:2})}</div><span class="income-del" onclick="deleteIncome('${e.id}')">✕</span></div>`).join('');
+    else incEl.innerHTML=entries.map(e=>`<div class="income-item"><div class="income-icon">${INCOME_ICONS[e.source]||'📦'}</div><div class="income-details"><div class="income-source">${INCOME_LABELS[e.source]||'Income'}${e.recurring?` <span style="font-size:9px;color:var(--accent);font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(108,92,231,0.15)">${e.frequency==='biweekly'?'Bi-weekly':e.frequency==='weekly'?'Weekly':'Monthly'}</span>`:''}</div><div class="income-meta">${e.date}${e.note?' · '+e.note:''}</div></div><div class="income-amount">+${fmtMoney(e.amount)}</div><span class="income-del" onclick="deleteIncome('${e.id}')">✕</span></div>`).join('');
   }
   renderNetWorth(totalSpent);
 }
@@ -7768,7 +8012,7 @@ function renderVelocityCard(currentSpent){
   const pct=baseline?Math.min((currentSpent/baseline)*100,120):0;
   const fillColor=pct>=100?'var(--red)':pct>=80?'var(--amber)':'var(--green)';
   const daysLeft=daysInMonth-dayOfMonth;
-  el.innerHTML=`<div class="velocity-card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><div style="font-size:12px;color:var(--text-dim);font-weight:600">Daily Rate</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px">$${dailyRate.toFixed(2)}<span style="font-size:12px;color:var(--text-muted)">/day</span></div></div><div style="text-align:right"><div style="font-size:12px;color:var(--text-dim);font-weight:600">Projection</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px;color:${pct>=100?'var(--red)':pct>=80?'var(--amber)':'var(--text)'}">$${projectedTotal.toFixed(0)}</div></div></div>${baseline?`<div class="velocity-bar"><div class="velocity-fill" style="width:${pct}%;background:${fillColor}"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)"><span>${pct.toFixed(0)}% of avg ($${baseline.toFixed(0)})</span><span>${daysLeft}d left</span></div><div class="velocity-projection">${pct>=100?`⚠️ On track to <strong style="color:var(--red)">exceed</strong> avg by $${(projectedTotal-baseline).toFixed(0)}`:pct>=80?`📊 Approaching average — $${(baseline-currentSpent).toFixed(0)} buffer left`:`✅ Healthy — $${(baseline-projectedTotal).toFixed(0)} under average`}</div>`:'<div style="font-size:12px;color:var(--text-muted);margin-top:8px">More months of data needed for velocity</div>'}</div>`;
+  el.innerHTML=`<div class="velocity-card"><div style="display:flex;justify-content:space-between;align-items:flex-start"><div><div style="font-size:12px;color:var(--text-dim);font-weight:600">Daily Rate</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px">${fmtMoney(dailyRate)}<span style="font-size:12px;color:var(--text-muted)">/day</span></div></div><div style="text-align:right"><div style="font-size:12px;color:var(--text-dim);font-weight:600">Projection</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;margin-top:2px;color:${pct>=100?'var(--red)':pct>=80?'var(--amber)':'var(--text)'}">${fmtMoney(projectedTotal, {decimals: 0})}</div></div></div>${baseline?`<div class="velocity-bar"><div class="velocity-fill" style="width:${pct}%;background:${fillColor}"></div></div><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)"><span>${pct.toFixed(0)}% of avg (${fmtMoney(baseline, {decimals: 0})})</span><span>${daysLeft}d left</span></div><div class="velocity-projection">${pct>=100?`⚠️ On track to <strong style="color:var(--red)">exceed</strong> avg by ${fmtMoney((projectedTotal-baseline), {decimals: 0})}`:pct>=80?`📊 Approaching average — ${fmtMoney((baseline-currentSpent), {decimals: 0})} buffer left`:`✅ Healthy — ${fmtMoney((baseline-projectedTotal), {decimals: 0})} under average`}</div>`:'<div style="font-size:12px;color:var(--text-muted);margin-top:8px">More months of data needed for velocity</div>'}</div>`;
 }
 
 function renderNetWorth(currentSpent){
@@ -7778,7 +8022,7 @@ function renderNetWorth(currentSpent){
   const now=new Date();let estimatedCash=0;
   for(let i=0;i<3;i++){const d=new Date(now.getFullYear(),now.getMonth()-i,1);const inc=getMonthIncome(d.getFullYear(),d.getMonth());const spent=getMonthTransactions(d.getFullYear(),d.getMonth(),'all').reduce((s,tx)=>s+tx.amount,0);estimatedCash+=Math.max(inc-spent,0);}
   const netWorth=estimatedCash-totalDebt;
-  el.innerHTML=`<div class="net-worth-card"><div class="nw-row"><span style="color:var(--text-dim)">💰 Estimated Cash (3mo)</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">+$${estimatedCash.toLocaleString('en-US',{minimumFractionDigits:0})}</span></div><div class="nw-row"><span style="color:var(--text-dim)">💳 Card Debt (est.)</span><span style="color:${totalDebt>0?'var(--red)':'var(--text-dim)'};font-family:'JetBrains Mono',monospace;font-weight:600">${totalDebt>0?'-$'+totalDebt.toLocaleString('en-US',{minimumFractionDigits:0}):'$0'}</span></div><div class="nw-total"><span>Net Worth Est.</span><span style="color:${netWorth>=0?'var(--green)':'var(--red)'};font-family:'JetBrains Mono',monospace">${netWorth>=0?'+':'-'}$${Math.abs(netWorth).toLocaleString('en-US',{minimumFractionDigits:0})}</span></div>${totalDebt===0?'<div style="font-size:11px;color:var(--text-muted);margin-top:8px">Log card balances in Debt Planner for accuracy</div>':''}</div>`;
+  el.innerHTML=`<div class="net-worth-card"><div class="nw-row"><span style="color:var(--text-dim)">💰 Estimated Cash (3mo)</span><span style="color:var(--green);font-family:'JetBrains Mono',monospace;font-weight:600">+${fmtMoney(estimatedCash, {decimals: 0})}</span></div><div class="nw-row"><span style="color:var(--text-dim)">💳 Card Debt (est.)</span><span style="color:${totalDebt>0?'var(--red)':'var(--text-dim)'};font-family:'JetBrains Mono',monospace;font-weight:600">${fmtMoney(-totalDebt, {decimals: 0})}</span></div><div class="nw-total"><span>Net Worth Est.</span><span style="color:${netWorth>=0?'var(--green)':'var(--red)'};font-family:'JetBrains Mono',monospace">${netWorth>=0?'+':'-'}${fmtMoney(Math.abs(netWorth), {decimals: 0})}</span></div>${totalDebt===0?'<div style="font-size:11px;color:var(--text-muted);margin-top:8px">Log card balances in Debt Planner for accuracy</div>':''}</div>`;
 }
 
 // ── NEW: Card balances panel in Finance Hub ──────────────────
@@ -7866,31 +8110,31 @@ function renderFinCardBalances(){
           <div style="font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;margin-top:1px">•••• ${card.last4}</div>
         </div>
         <div style="text-align:right">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:${estimated>0?'var(--red)':'var(--green)'}">$${estimated.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:${estimated>0?'var(--red)':'var(--green)'}">${fmtMoney(estimated)}</div>
           <div style="font-size:10px;color:var(--text-muted);margin-top:1px">Est. owed now</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:${cols};gap:7px;margin-bottom:${limit>0?'10px':'0'}">
         <div style="background:var(--bg);border-radius:7px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700;letter-spacing:0.3px">Statement Bal</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--amber);margin-top:3px">${statBal>0?'$'+statBal.toLocaleString('en-US',{minimumFractionDigits:2}):'$0.00'}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--amber);margin-top:3px">${statBal>0?fmtMoney(statBal):fmtMoney(0)}</div>
           <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${lastUpdated?'as of '+lastUpdated:'Not logged'}</div>
         </div>
         <div style="background:var(--bg);border-radius:7px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700;letter-spacing:0.3px">${statBal>0?'New Charges':'This Month'}</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">${charges>0?'+$'+charges.toLocaleString('en-US',{minimumFractionDigits:2}):'$0.00'}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">${charges>0?'+'+fmtMoney(charges):fmtMoney(0)}</div>
           <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${statBal>0&&lastUpdated?'since '+lastUpdated:'this month'}</div>
         </div>
         ${hasPayments?`<div style="background:var(--bg);border-radius:7px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700;letter-spacing:0.3px">Payments Made</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--green);margin-top:3px">-$${payments.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--green);margin-top:3px">-${fmtMoney(payments)}</div>
           <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${statBal>0&&lastUpdated?'since '+lastUpdated:'this month'}</div>
         </div>`:''}
       </div>
       ${limit>0?`<div style="margin-top:2px">
         <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:3px">
-          <span>${usedPct.toFixed(0)}% of $${limit.toLocaleString()} limit</span>
-          <span>$${Math.max(limit-estimated,0).toLocaleString('en-US',{minimumFractionDigits:0})} available</span>
+          <span>${usedPct.toFixed(0)}% of ${fmtMoney(limit, {decimals: 0})} limit</span>
+          <span>${fmtMoney(Math.max(limit-estimated,0), {decimals: 0})} available</span>
         </div>
         <div style="height:5px;background:rgba(255,255,255,0.07);border-radius:3px;overflow:hidden">
           <div style="height:100%;border-radius:3px;width:${usedPct}%;background:${barColor};transition:width 0.6s ease"></div>
@@ -7954,7 +8198,7 @@ function renderCashFlowCalendar(){
       const daysAway=todayDay!==null?d.day-todayDay:null;
       const urgency=daysAway!==null&&daysAway<=3?'var(--red)':daysAway!==null&&daysAway<=7?'var(--amber)':'var(--text-dim)';
       const label=daysAway===0?'Today':daysAway===1?'Tomorrow':daysAway!==null?`In ${daysAway}d`:'';
-      warnings.push(`<div class="cf-warning${daysAway!==null&&daysAway<=3?' has-urgent':''}"><div class="cf-warning-title" style="color:${urgency}">⚠️ ${date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}${label?' · '+label:''} — $${d.outflow.toFixed(0)} due</div><div class="cf-warning-detail">${d.events.filter(e=>e.type!=='income').map(e=>e.label+(e.amount>0?' ($'+e.amount.toFixed(0)+')':'')).join(', ')}</div></div>`);
+      warnings.push(`<div class="cf-warning${daysAway!==null&&daysAway<=3?' has-urgent':''}"><div class="cf-warning-title" style="color:${urgency}">⚠️ ${date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}${label?' · '+label:''} — ${fmtMoney(d.outflow, {decimals: 0})} due</div><div class="cf-warning-detail">${d.events.filter(e=>e.type!=='income').map(e=>e.label+(e.amount>0?' ($'+e.amount.toFixed(0)+')':'')).join(', ')}</div></div>`);
     });
 
   const dayNames=['S','M','T','W','T','F','S'];
@@ -8001,10 +8245,10 @@ function saveGoal(){
 }
 function addToGoal(goalId){
   const g=savingsGoals.find(g=>g.id===goalId);if(!g)return;
-  const amt=parseFloat(prompt(`Add to "${g.name}" (currently $${(g.savedSoFar||0).toFixed(0)} saved):`));
+  const amt=parseFloat(prompt(`Add to "${g.name}" (currently ${fmtMoney((g.savedSoFar||0), {decimals: 0})} saved):`));
   if(!amt||amt<=0)return;
   g.savedSoFar=Math.min((g.savedSoFar||0)+amt,g.target);saveToStorage();renderGoals();
-  showSyncBar('success','💰',`$${amt.toFixed(2)} added to <strong>${g.name}</strong>`);
+  showSyncBar('success','💰',`${fmtMoney(amt)} added to <strong>${g.name}</strong>`);
 }
 function deleteGoal(goalId){if(!confirm('Delete this goal?'))return;cloudDeletes.savings_goals.push(goalId);savingsGoals=savingsGoals.filter(g=>g.id!==goalId);saveToStorage();renderGoals();}
 function renderGoals(){
@@ -8015,7 +8259,7 @@ function renderGoals(){
     const remaining=g.target-(g.savedSoFar||0);
     let daysLeft=null,perMonth=null,onTrack=null;
     if(g.deadline){const dead=new Date(g.deadline+'T23:59:59');const tod=new Date();daysLeft=Math.max(Math.ceil((dead-tod)/86400000),0);const monthsLeft=Math.max(daysLeft/30.4,0.1);perMonth=remaining/monthsLeft;const avail=Math.max(getMonthIncome(currentYear,currentMonth)-getMonthTransactions(currentYear,currentMonth,'all').reduce((s,tx)=>s+tx.amount,0),0);onTrack=avail>=perMonth;}
-    return `<div class="goal-card"><div class="goal-header"><div class="goal-icon-wrap" style="background:${g.color}22">${g.icon||'🎯'}</div><div style="flex:1"><div class="goal-name">${g.name}</div><div class="goal-deadline">${g.deadline?`📅 ${new Date(g.deadline+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft!==null?' · '+daysLeft+'d':''}`:' No deadline'}</div></div><div class="goal-actions"><button class="goal-action-btn" onclick="addToGoal('${g.id}')">+ Add</button><button class="goal-action-btn" onclick="openGoalModal('${g.id}')">Edit</button><button class="goal-action-btn" style="color:var(--red)" onclick="deleteGoal('${g.id}')">✕</button></div></div><div class="goal-progress-row"><span style="font-weight:600">$${(g.savedSoFar||0).toLocaleString('en-US',{minimumFractionDigits:0})} saved</span><span>of $${g.target.toLocaleString()} · ${pct.toFixed(0)}%</span></div><div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%;background:${g.color}"></div></div><div class="goal-stats"><div class="goal-stat"><div class="goal-stat-val" style="color:var(--red)">$${remaining.toLocaleString('en-US',{minimumFractionDigits:0})}</div><div class="goal-stat-lbl">Remaining</div></div><div class="goal-stat"><div class="goal-stat-val" style="color:var(--blue)">${perMonth?'$'+perMonth.toFixed(0):'—'}</div><div class="goal-stat-lbl">Per Month</div></div><div class="goal-stat"><div class="goal-stat-val">${onTrack===null?'—':onTrack?'✅':'⚠️'}</div><div class="goal-stat-lbl">On Track</div></div></div></div>`;
+    return `<div class="goal-card"><div class="goal-header"><div class="goal-icon-wrap" style="background:${g.color}22">${g.icon||'🎯'}</div><div style="flex:1"><div class="goal-name">${g.name}</div><div class="goal-deadline">${g.deadline?`📅 ${new Date(g.deadline+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft!==null?' · '+daysLeft+'d':''}`:' No deadline'}</div></div><div class="goal-actions"><button class="goal-action-btn" onclick="addToGoal('${g.id}')">+ Add</button><button class="goal-action-btn" onclick="openGoalModal('${g.id}')">Edit</button><button class="goal-action-btn" style="color:var(--red)" onclick="deleteGoal('${g.id}')">✕</button></div></div><div class="goal-progress-row"><span style="font-weight:600">${fmtMoney((g.savedSoFar||0), {decimals: 0})} saved</span><span>of ${fmtMoney(g.target, {decimals: 0})} · ${pct.toFixed(0)}%</span></div><div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%;background:${g.color}"></div></div><div class="goal-stats"><div class="goal-stat"><div class="goal-stat-val" style="color:var(--red)">${fmtMoney(remaining, {decimals: 0})}</div><div class="goal-stat-lbl">Remaining</div></div><div class="goal-stat"><div class="goal-stat-val" style="color:var(--blue)">${perMonth?fmtMoney(perMonth, {decimals: 0}):'—'}</div><div class="goal-stat-lbl">Per Month</div></div><div class="goal-stat"><div class="goal-stat-val">${onTrack===null?'—':onTrack?'✅':'⚠️'}</div><div class="goal-stat-lbl">On Track</div></div></div></div>`;
   }).join('');
   renderPayYourself();
 }
@@ -8026,7 +8270,7 @@ function renderPayYourself(){
   const available=Math.max(monthlyIncome-monthlySpent,0);
   const rec20=monthlyIncome*0.20;
   const totalTarget=savingsGoals.filter(g=>(g.savedSoFar||0)<g.target).reduce((s,g)=>s+(g.target-(g.savedSoFar||0)),0);
-  el.innerHTML=`<div class="pay-yourself-card"><div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:12px">The <strong style="color:var(--text)">Pay Yourself First</strong> rule: set aside savings before spending. Aim for 20% of income.</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="background:var(--bg);border-radius:8px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">20% Target</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--green);margin-top:3px">${monthlyIncome>0?'$'+rec20.toFixed(0):'—'}</div></div><div style="background:var(--bg);border-radius:8px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Available Now</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:${available>0?'var(--green)':'var(--red)'};margin-top:3px">${monthlyIncome>0?(available>0?'$'+available.toFixed(0):'-$'+Math.abs(available).toFixed(0)):'—'}</div></div></div>${totalTarget>0?`<div style="margin-top:10px;padding:9px 11px;background:rgba(108,92,231,0.07);border-radius:8px;font-size:13px;color:var(--text-dim)">Total goal gap: <strong style="color:var(--text)">$${totalTarget.toLocaleString('en-US',{minimumFractionDigits:0})}</strong></div>`:''}</div>`;
+  el.innerHTML=`<div class="pay-yourself-card"><div style="font-size:13px;color:var(--text-dim);line-height:1.6;margin-bottom:12px">The <strong style="color:var(--text)">Pay Yourself First</strong> rule: set aside savings before spending. Aim for 20% of income.</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px"><div style="background:var(--bg);border-radius:8px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">20% Target</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--green);margin-top:3px">${monthlyIncome>0?fmtMoney(rec20, {decimals: 0}):'—'}</div></div><div style="background:var(--bg);border-radius:8px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Available Now</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:${available>0?'var(--green)':'var(--red)'};margin-top:3px">${monthlyIncome>0?(available>0?fmtMoney(available, {decimals: 0}):fmtMoney(-(Math.abs(available)), {decimals: 0})):'—'}</div></div></div>${totalTarget>0?`<div style="margin-top:10px;padding:9px 11px;background:rgba(108,92,231,0.07);border-radius:8px;font-size:13px;color:var(--text-dim)">Total goal gap: <strong style="color:var(--text)">${fmtMoney(totalTarget, {decimals: 0})}</strong></div>`:''}</div>`;
 }
 
 // ══════════════════════════════════════════════════════
@@ -8063,7 +8307,7 @@ function renderDebtPlanner(){
     const monthlyInterest=bal>0&&apr>0?bal*(apr/100/12):0;
     const limit=card.creditLimit||0;
     const util=limit>0?Math.min((bal/limit)*100,100):0;
-    return `<div class="debt-card"><div class="debt-card-header"><div class="debt-card-dot" style="background:${card.color}"></div><div><div class="debt-card-name">${card.name}</div><div class="debt-card-sub">•••• ${card.last4}${lastUpdated?' · '+lastUpdated:''}</div></div><button class="debt-update-btn" onclick="openLogBalanceModal('${card.id}')">Update</button></div><div class="debt-stats"><div class="debt-stat"><div class="debt-stat-val" style="color:${bal>0?'var(--red)':'var(--green)'}">${bal>0?'$'+bal.toLocaleString('en-US',{minimumFractionDigits:0}):'$0'}</div><div class="debt-stat-lbl">Est. Owed</div></div><div class="debt-stat"><div class="debt-stat-val" style="color:var(--amber)">${apr>0?apr.toFixed(1)+'%':'—'}</div><div class="debt-stat-lbl">APR</div></div><div class="debt-stat"><div class="debt-stat-val" style="color:var(--red)">${monthlyInterest>0?'$'+monthlyInterest.toFixed(0):'—'}</div><div class="debt-stat-lbl">Mo. Interest</div></div></div>${limit>0?`<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:3px"><span>Utilization: ${util.toFixed(0)}%</span><span>${util>=70?'⚠️ High':util>=30?'Moderate':'✅ Low'}</span></div><div class="debt-payoff-bar"><div class="debt-payoff-fill" style="width:${util}%;background:${util>=70?'var(--red)':util>=30?'var(--amber)':'var(--green)'}"></div></div>`:''}</div>`;
+    return `<div class="debt-card"><div class="debt-card-header"><div class="debt-card-dot" style="background:${card.color}"></div><div><div class="debt-card-name">${card.name}</div><div class="debt-card-sub">•••• ${card.last4}${lastUpdated?' · '+lastUpdated:''}</div></div><button class="debt-update-btn" onclick="openLogBalanceModal('${card.id}')">Update</button></div><div class="debt-stats"><div class="debt-stat"><div class="debt-stat-val" style="color:${bal>0?'var(--red)':'var(--green)'}">${bal>0?fmtMoney(bal, {decimals: 0}):fmtMoney(0, {decimals: 0})}</div><div class="debt-stat-lbl">Est. Owed</div></div><div class="debt-stat"><div class="debt-stat-val" style="color:var(--amber)">${apr>0?apr.toFixed(1)+'%':'—'}</div><div class="debt-stat-lbl">APR</div></div><div class="debt-stat"><div class="debt-stat-val" style="color:var(--red)">${monthlyInterest>0?fmtMoney(monthlyInterest, {decimals: 0}):'—'}</div><div class="debt-stat-lbl">Mo. Interest</div></div></div>${limit>0?`<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:3px"><span>Utilization: ${util.toFixed(0)}%</span><span>${util>=70?'⚠️ High':util>=30?'Moderate':'✅ Low'}</span></div><div class="debt-payoff-bar"><div class="debt-payoff-fill" style="width:${util}%;background:${util>=70?'var(--red)':util>=30?'var(--amber)':'var(--green)'}"></div></div>`:''}</div>`;
   }).join('');
   renderDebtProjection();
 }
@@ -8081,7 +8325,7 @@ function renderDebtProjection(){
   const totalDebt=debts.reduce((s,d)=>s+d.statementBalance,0);
   const totalMinPay=debts.reduce((s,d)=>s+d.minPay,0);
   const totalMonthlyInterest=debts.reduce((s,d)=>s+(d.statementBalance*(d.apr/100/12)),0);
-  stratEl.innerHTML=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:10px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:12px"><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Debt</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">$${totalDebt.toLocaleString('en-US',{minimumFractionDigits:0})}</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Min Payments</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--amber);margin-top:3px">$${totalMinPay.toFixed(0)}/mo</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Mo. Interest</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">$${totalMonthlyInterest.toFixed(0)}</div></div></div><div style="font-size:13px;font-weight:600;margin-bottom:9px">Payoff Strategy</div><div class="strategy-toggle"><div class="strategy-btn ${debtStrategy==='avalanche'?'active':''}" id="strategy-avalanche" onclick="setDebtStrategy('avalanche')">🔥 Avalanche<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Highest APR first</div></div><div class="strategy-btn ${debtStrategy==='snowball'?'active':''}" id="strategy-snowball" onclick="setDebtStrategy('snowball')">❄️ Snowball<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Smallest balance first</div></div></div></div>`;
+  stratEl.innerHTML=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:10px"><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:12px"><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Debt</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">${fmtMoney(totalDebt, {decimals: 0})}</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Min Payments</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--amber);margin-top:3px">${fmtMoney(totalMinPay, {decimals: 0})}/mo</div></div><div style="background:var(--bg);border-radius:6px;padding:9px"><div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Mo. Interest</div><div style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--red);margin-top:3px">${fmtMoney(totalMonthlyInterest, {decimals: 0})}</div></div></div><div style="font-size:13px;font-weight:600;margin-bottom:9px">Payoff Strategy</div><div class="strategy-toggle"><div class="strategy-btn ${debtStrategy==='avalanche'?'active':''}" id="strategy-avalanche" onclick="setDebtStrategy('avalanche')">🔥 Avalanche<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Highest APR first</div></div><div class="strategy-btn ${debtStrategy==='snowball'?'active':''}" id="strategy-snowball" onclick="setDebtStrategy('snowball')">❄️ Snowball<div style="font-size:10px;color:var(--text-muted);font-weight:400;margin-top:1px">Smallest balance first</div></div></div></div>`;
   const sorted=[...debts].sort((a,b)=>debtStrategy==='avalanche'?b.apr-a.apr:a.statementBalance-b.statementBalance);
   const _now=new Date();const _rYear=_now.getFullYear();const _rMonth=_now.getMonth();
   const monthlyIncome=getMonthIncome(_rYear,_rMonth);
@@ -8094,7 +8338,7 @@ function renderDebtProjection(){
   while(balances.some(d=>d.bal>0.01)&&months<MAX_MONTHS){months++;let remaining=totalPayment;balances=balances.map(d=>{if(d.bal<=0)return d;const interest=d.bal*(d.apr/100/12);totalInterestPaid+=interest;const newBal=d.bal+interest;const pay=Math.min(d.minPay,newBal);remaining-=pay;return{...d,bal:Math.max(newBal-pay,0)};});for(const d of balances){if(d.bal>0&&remaining>0){const pay=Math.min(remaining,d.bal);d.bal-=pay;remaining-=pay;}}}
   const years=Math.floor(months/12),mos=months%12;
   const payoffDate=new Date();payoffDate.setMonth(payoffDate.getMonth()+months);
-  projEl.innerHTML=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px"><div style="background:var(--bg);border-radius:7px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Debt-Free In</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--green);margin-top:3px">${months>=MAX_MONTHS?'360+ mo':years>0?years+'y '+mos+'m':mos+' mo'}</div><div style="font-size:11px;color:var(--text-muted);margin-top:1px">${months<MAX_MONTHS?payoffDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'Increase payments'}</div></div><div style="background:var(--bg);border-radius:7px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Interest</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--amber);margin-top:3px">$${totalInterestPaid.toFixed(0)}</div><div style="font-size:11px;color:var(--text-muted);margin-top:1px">At current pace</div></div></div>${extraPayment>0?`<div style="padding:9px 11px;background:rgba(0,210,160,0.07);border-radius:7px;font-size:12px;color:var(--text-dim);margin-bottom:10px">💡 Using <strong style="color:var(--text)">$${extraPayment.toFixed(0)}/mo extra</strong> from savings</div>`:`<div style="padding:9px 11px;background:rgba(255,107,107,0.07);border-radius:7px;font-size:12px;color:var(--text-dim);margin-bottom:10px">Log income in Finance Hub to calculate extra payments</div>`}<div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:7px">Payoff Order</div>${sorted.map(d=>{const card=CARDS.find(c=>c.id===d.card?.id);return`<div class="projection-row"><div style="display:flex;align-items:center;gap:7px"><div style="width:7px;height:7px;border-radius:50%;background:${card?.color||'#666'}"></div><span>${card?.name||'Card'} ••${card?.last4?.slice(-2)||'??'}</span></div><span style="color:var(--text-dim);font-size:11px">${debtStrategy==='avalanche'?d.apr.toFixed(1)+'% APR':'$'+d.statementBalance.toFixed(0)}</span></div>`;}).join('')}</div>`;
+  projEl.innerHTML=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px"><div style="background:var(--bg);border-radius:7px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Debt-Free In</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--green);margin-top:3px">${months>=MAX_MONTHS?'360+ mo':years>0?years+'y '+mos+'m':mos+' mo'}</div><div style="font-size:11px;color:var(--text-muted);margin-top:1px">${months<MAX_MONTHS?payoffDate.toLocaleDateString('en-US',{month:'short',year:'numeric'}):'Increase payments'}</div></div><div style="background:var(--bg);border-radius:7px;padding:11px"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Interest</div><div style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;color:var(--amber);margin-top:3px">${fmtMoney(totalInterestPaid, {decimals: 0})}</div><div style="font-size:11px;color:var(--text-muted);margin-top:1px">At current pace</div></div></div>${extraPayment>0?`<div style="padding:9px 11px;background:rgba(0,210,160,0.07);border-radius:7px;font-size:12px;color:var(--text-dim);margin-bottom:10px">💡 Using <strong style="color:var(--text)">${fmtMoney(extraPayment, {decimals: 0})}/mo extra</strong> from savings</div>`:`<div style="padding:9px 11px;background:rgba(255,107,107,0.07);border-radius:7px;font-size:12px;color:var(--text-dim);margin-bottom:10px">Log income in Finance Hub to calculate extra payments</div>`}<div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:7px">Payoff Order</div>${sorted.map(d=>{const card=CARDS.find(c=>c.id===d.card?.id);return`<div class="projection-row"><div style="display:flex;align-items:center;gap:7px"><div style="width:7px;height:7px;border-radius:50%;background:${card?.color||'#666'}"></div><span>${card?.name||'Card'} ••${card?.last4?.slice(-2)||'??'}</span></div><span style="color:var(--text-dim);font-size:11px">${debtStrategy==='avalanche'?d.apr.toFixed(1)+'% APR':fmtMoney(d.statementBalance, {decimals: 0})}</span></div>`;}).join('')}</div>`;
 }
 
 // ══════════════════════════════════════════════════════
@@ -8201,7 +8445,7 @@ function renderPaymentsPage() {
   // Total paid banner
   if (totalPaidThisMonth > 0) {
     html += `<div style="background:linear-gradient(135deg,rgba(0,210,160,0.1),rgba(0,210,160,0.04));border:1px solid rgba(0,210,160,0.25);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
-      <div><div style="font-size:11px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.5px">Paid This Month</div><div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:var(--green);margin-top:3px">$${totalPaidThisMonth.toLocaleString('en-US',{minimumFractionDigits:2})}</div></div>
+      <div><div style="font-size:11px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.5px">Paid This Month</div><div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:var(--green);margin-top:3px">${fmtMoney(totalPaidThisMonth)}</div></div>
       <div style="font-size:28px">✅</div>
     </div>`;
   }
@@ -8224,24 +8468,24 @@ function renderPaymentsPage() {
       ${statBal > 0 ? `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:12px">
         <div style="background:var(--bg);border-radius:6px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Statement Bal</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--amber);margin-top:3px">$${statBal.toLocaleString('en-US',{minimumFractionDigits:0})}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--amber);margin-top:3px">${fmtMoney(statBal, {decimals: 0})}</div>
         </div>
         <div style="background:var(--bg);border-radius:6px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Paid</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--green);margin-top:3px">$${totalPaid.toLocaleString('en-US',{minimumFractionDigits:0})}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--green);margin-top:3px">${fmtMoney(totalPaid, {decimals: 0})}</div>
         </div>
         <div style="background:var(--bg);border-radius:6px;padding:9px">
           <div style="font-size:9px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Est. Owed Now</div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${estimated>0?'var(--red)':'var(--green)'};margin-top:3px">${estimated>0?'$'+estimated.toLocaleString('en-US',{minimumFractionDigits:0}):'Paid ✓'}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${estimated>0?'var(--red)':'var(--green)'};margin-top:3px">${estimated>0?fmtMoney(estimated, {decimals: 0}):'Paid ✓'}</div>
         </div>
-      </div>${charges>0?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;padding:7px 10px;background:rgba(255,107,107,0.06);border-radius:6px">+$${charges.toLocaleString('en-US',{minimumFractionDigits:2})} in new charges since statement</div>`:''}` : ''}
+      </div>${charges>0?`<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;padding:7px 10px;background:rgba(255,107,107,0.06);border-radius:6px">+${fmtMoney(charges)} in new charges since statement</div>`:''}` : ''}
       ${payments.length === 0
         ? `<div style="font-size:13px;color:var(--text-muted);padding:10px 0;text-align:center">No payments logged yet</div>`
         : payments.map((p,i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid var(--border)">
             <div style="display:flex;align-items:center;gap:10px">
               <div style="width:32px;height:32px;border-radius:8px;background:rgba(0,210,160,0.12);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0">${p.source==='gmail'?'📧':'✏️'}</div>
               <div>
-                <div style="font-size:13px;font-weight:600;color:var(--text)">$${p.amount.toLocaleString('en-US',{minimumFractionDigits:2})}</div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">${fmtMoney(p.amount)}</div>
                 <div style="font-size:11px;color:var(--text-dim);margin-top:1px">${p.date} · ${p.source==='gmail'?'Auto from Gmail':p.source==='manual'?'Manual':'Logged'}${p.note?' · '+p.note:''}</div>
               </div>
             </div>
@@ -8264,7 +8508,8 @@ function openAddPaymentModal(cardId) {
   if (srcSel) {
     const accounts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
     srcSel.innerHTML = '<option value="">— No account selected —</option>'
-      + accounts.map(a => `<option value="${a.id}">${a.name} ($${(cardBalances[a.id]?.statementBalance || 0).toFixed(2)})</option>`).join('');
+      + accounts.map(a => `<option value="${a.id}">${a.name} (${fmtMoney((cardBalances[a.id]?.statementBalance || 0))})</option>`).join('');
+    srcSel.value = getDefaultCashAccountId() || '';
   }
   document.getElementById('paymentAmountInput').value = '';
   document.getElementById('paymentDateInput').value = ptDateStr();
@@ -8290,7 +8535,7 @@ function saveManualPayment() {
   prunePayments();
   saveToStorage();
   closeModal('addPaymentModal');
-  showSyncBar('success', '✅', `Payment of <strong>$${amount.toFixed(2)}</strong> logged`);
+  showSyncBar('success', '✅', `Payment of <strong>${fmtMoney(amount)}</strong> logged`);
   renderPaymentsPage();
   renderFinCardBalances(); // refresh Finance Hub card balances if visible
   if (typeof renderAccountsPage === 'function') renderAccountsPage();
@@ -8803,7 +9048,7 @@ function sageRenderAddPreview(p) {
   ).join('');
   card.innerHTML = `
     <h4>New transaction — confirm?</h4>
-    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>${fmtMoney((+p.amount))}</span></div>
     <div class="sage-budget-row"><span>Merchant</span><span>${escapeHtml(p.merchant)}</span></div>
     <div class="sage-budget-row"><span>Category</span><span>${cat.icon} ${cat.name}</span></div>
     <div class="sage-budget-row"><span>Date</span><span>${p.date}</span></div>
@@ -8850,7 +9095,7 @@ function sageCommitTransaction(p) {
   const parts = tx.date.split('-');
   if (parts.length === 3) { currentYear = +parts[0]; currentMonth = +parts[1] - 1; updateMonthLabel?.(); }
   renderAll();
-  sageAppendMsg('assistant', `✓ Saved: $${tx.amount.toFixed(2)} at ${tx.merchant} on ${tx.date}.`);
+  sageAppendMsg('assistant', `✓ Saved: ${fmtMoney(tx.amount)} at ${tx.merchant} on ${tx.date}.`);
 }
 
 function escapeHtml(s) {
@@ -8935,7 +9180,7 @@ function sageRenderDeleteCandidates(txs) {
     const cat = CATEGORIES.find(c => c.id === t.category) || {};
     return `<div class="sage-budget-row" style="align-items:center;gap:8px">
       <span style="flex:1;min-width:0">${cat.icon || ''} ${escapeHtml(t.merchant)} · <span style="color:var(--text-muted)">${t.date}</span></span>
-      <span>$${(+t.amount).toFixed(2)}</span>
+      <span>${fmtMoney((+t.amount))}</span>
       <button class="sage-budget-cancel" style="flex:0;padding:4px 10px;font-size:11px;background:var(--red);color:#fff;border:none" data-tx="${t.id}">Delete</button>
     </div>`;
   }).join('');
@@ -8958,7 +9203,7 @@ function sageRenderDeleteCandidates(txs) {
       saveToStorage();
       renderAll();
       card.remove();
-      sageAppendMsg('assistant', `🗑️ Deleted: $${(+tx.amount).toFixed(2)} at ${tx.merchant} on ${tx.date}.`);
+      sageAppendMsg('assistant', `🗑️ Deleted: ${fmtMoney((+tx.amount))} at ${tx.merchant} on ${tx.date}.`);
     });
   });
   // Cancel button = the last (full-width) one
@@ -9044,7 +9289,7 @@ function sageRenderPayPreview(p) {
   ).join('');
   card.innerHTML = `
     <h4>Log card payment?</h4>
-    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>${fmtMoney((+p.amount))}</span></div>
     <div class="sage-budget-row"><span>Date</span><span>${p.date}</span></div>
     <div class="sage-budget-row"><span>Card</span>
       <span>
@@ -9064,7 +9309,7 @@ function sageRenderPayPreview(p) {
     if (!finalCardId) { sageAppendMsg('error', '⚠️ Pick a card first.'); return; }
     savePayment(finalCardId, 'sage', +p.amount, p.date);
     card.remove();
-    sageAppendMsg('assistant', `✓ Logged payment of $${(+p.amount).toFixed(2)} on ${p.date}.`);
+    sageAppendMsg('assistant', `✓ Logged payment of ${fmtMoney((+p.amount))} on ${p.date}.`);
   };
   thread.scrollTop = 9e9;
 }
@@ -9224,7 +9469,7 @@ async function sageBuildBudget() {
   const userMsg =
     'Here is my spending over the last 90 days, grouped by category (in dollars):\n' +
     JSON.stringify(Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, +v.toFixed(2)])), null, 2) +
-    '\n\nOverall monthly cap: ' + (overall ? '$' + overall : 'not set — pick something reasonable') +
+    '\n\nOverall monthly cap: ' + (overall ? fmtMoney(overall, {decimals: 0}) : 'not set — pick something reasonable') +
     '\n\nReturn a per-category monthly budget for me.';
 
   try {
@@ -9259,12 +9504,12 @@ function sageRenderBudgetPreview({ budgets: proposed, notes }) {
     .filter(id => proposed[id] > 0)
     .map(id => {
       const cat = CATEGORIES.find(c => c.id === id);
-      return `<div class="sage-budget-row"><span>${cat.icon} ${cat.name}</span><span>$${proposed[id].toLocaleString()}</span></div>`;
+      return `<div class="sage-budget-row"><span>${cat.icon} ${cat.name}</span><span>${fmtMoney(proposed[id], {decimals: 0})}</span></div>`;
     }).join('');
   card.innerHTML = `
-    <h4>Proposed monthly budget — $${total.toLocaleString()} total</h4>
+    <h4>Proposed monthly budget — ${fmtMoney(total, {decimals: 0})} total</h4>
     ${rows}
-    <div class="sage-budget-row"><span style="color:var(--accent);font-weight:600">Total</span><span>$${total.toLocaleString()}</span></div>
+    <div class="sage-budget-row"><span style="color:var(--accent);font-weight:600">Total</span><span>${fmtMoney(total, {decimals: 0})}</span></div>
     <p style="font-size:12px;color:var(--text-dim);margin:10px 0 0;font-family:var(--font-serif),serif">${notes || ''}</p>
     <div class="sage-budget-actions">
       <button class="sage-budget-cancel" onclick="this.closest('.sage-budget-preview').remove()">Discard</button>
@@ -9388,7 +9633,7 @@ function sageRenderSetBudgetPreview(p) {
   card.innerHTML = `
     <h4>Set budget?</h4>
     <div class="sage-budget-row"><span>Target</span><span>${escapeHtml(label)}</span></div>
-    <div class="sage-budget-row"><span>Limit</span><span>$${(+p.amount).toFixed(2)} / month</span></div>
+    <div class="sage-budget-row"><span>Limit</span><span>${fmtMoney((+p.amount))} / month</span></div>
     <div class="sage-budget-actions">
       <button class="sage-budget-cancel">Discard</button>
       <button class="sage-budget-apply">Save</button>
@@ -9401,7 +9646,7 @@ function sageRenderSetBudgetPreview(p) {
     if (typeof renderBudgets === 'function') renderBudgets();
     if (typeof renderAll === 'function') renderAll();
     card.remove();
-    sageAppendMsg('assistant', `✓ Budget set: ${label} = $${(+p.amount).toFixed(2)}/mo.`);
+    sageAppendMsg('assistant', `✓ Budget set: ${label} = ${fmtMoney((+p.amount))}/mo.`);
   };
   thread.scrollTop = 9e9;
 }
@@ -9537,7 +9782,7 @@ function sageRenderSchedulePreview(p) {
     <h4>Schedule this?</h4>
     <div class="sage-budget-row"><span>Kind</span><span>${KIND_LABEL[p.kind] || p.kind}</span></div>
     <div class="sage-budget-row"><span>Label</span><span>${escapeHtml(p.label)}</span></div>
-    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>${fmtMoney((+p.amount))}</span></div>
     <div class="sage-budget-row"><span>Cadence</span><span>${cadence}</span></div>
     ${flowRows.join('')}
     <div class="sage-budget-row"><span>Auto-apply</span><span>${p.auto_apply ? '✅ Yes' : 'No (informational)'}</span></div>
@@ -9570,7 +9815,7 @@ function sageRenderSchedulePreview(p) {
     if (typeof renderCashFlowCalendar === 'function') renderCashFlowCalendar();
     if (typeof renderAll === 'function') renderAll();
     card.remove();
-    sageAppendMsg('assistant', `✓ Scheduled: ${p.label} ($${(+p.amount).toFixed(2)}, ${cadence}).`);
+    sageAppendMsg('assistant', `✓ Scheduled: ${p.label} (${fmtMoney((+p.amount))}, ${cadence}).`);
   };
   thread.scrollTop = 9e9;
 }
@@ -9660,7 +9905,7 @@ function sageRenderSubPreview(p) {
   card.innerHTML = `
     <h4>Add subscription?</h4>
     <div class="sage-budget-row"><span>Service</span><span>${escapeHtml(p.name)}</span></div>
-    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)} / ${p.cycle}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>${fmtMoney((+p.amount))} / ${p.cycle}</span></div>
     <div class="sage-budget-row"><span>Charges day</span><span>${p.debit_day} of each month</span></div>
     <div class="sage-budget-row"><span>Category</span><span>${cat.icon} ${cat.name}</span></div>
     <div class="sage-budget-row"><span>Card</span>
@@ -9695,7 +9940,7 @@ function sageRenderSubPreview(p) {
     if (typeof renderSubscriptions === 'function') renderSubscriptions();
     if (typeof renderAll === 'function') renderAll();
     card.remove();
-    sageAppendMsg('assistant', `✓ Subscription added: ${p.name} ($${(+p.amount).toFixed(2)}/${p.cycle}).`);
+    sageAppendMsg('assistant', `✓ Subscription added: ${p.name} (${fmtMoney((+p.amount))}/${p.cycle}).`);
   };
   thread.scrollTop = 9e9;
 }
@@ -9791,7 +10036,7 @@ function sageRenderIncomePreview(p) {
 
   card.innerHTML = `
     <h4>Log income?</h4>
-    <div class="sage-budget-row"><span>Amount</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>Amount</span><span>${fmtMoney((+p.amount))}</span></div>
     <div class="sage-budget-row"><span>Source</span><span>${SOURCE_LABEL[p.source] || p.source}</span></div>
     <div class="sage-budget-row"><span>Frequency</span><span>${FREQ_LABEL[p.frequency] || p.frequency}</span></div>
     <div class="sage-budget-row"><span>${p.frequency === 'once' ? 'Date' : 'Start date'}</span><span>${p.date}</span></div>
@@ -9832,7 +10077,7 @@ function sageRenderIncomePreview(p) {
     if (typeof renderAccountsPage === 'function') renderAccountsPage();
     if (typeof renderAll === 'function') renderAll();
     card.remove();
-    sageAppendMsg('assistant', `✓ Income logged: $${(+p.amount).toFixed(2)} (${FREQ_LABEL[p.frequency] || p.frequency}).`);
+    sageAppendMsg('assistant', `✓ Income logged: ${fmtMoney((+p.amount))} (${FREQ_LABEL[p.frequency] || p.frequency}).`);
   };
   thread.scrollTop = 9e9;
 }
@@ -9929,7 +10174,7 @@ function sageRenderBalancePreview(p) {
           : (acct ? `${acct.name} (••••${acct.last4})` : '⚠️ no account')}
       </span>
     </div>
-    <div class="sage-budget-row"><span>New balance</span><span>$${(+p.amount).toFixed(2)}</span></div>
+    <div class="sage-budget-row"><span>New balance</span><span>${fmtMoney((+p.amount))}</span></div>
     <div class="sage-budget-actions">
       <button class="sage-budget-cancel">Discard</button>
       <button class="sage-budget-apply">Save</button>
@@ -9951,7 +10196,7 @@ function sageRenderBalancePreview(p) {
     if (typeof renderAll === 'function') renderAll();
     card.remove();
     const a = CARDS.find(c => c.id === finalId);
-    sageAppendMsg('assistant', `✓ Balance updated: ${a?.name || 'account'} = $${(+p.amount).toFixed(2)}.`);
+    sageAppendMsg('assistant', `✓ Balance updated: ${a?.name || 'account'} = ${fmtMoney((+p.amount))}.`);
   };
   thread.scrollTop = 9e9;
 }
@@ -10149,7 +10394,7 @@ init();
       const saved = savingsGoals.reduce((s, g) => s + (g.savedSoFar || 0), 0);
       goalsEl.textContent = n === 0
         ? 'NO ACTIVE GOALS'
-        : `${n} GOAL${n === 1 ? '' : 'S'} · $${Math.round(saved).toLocaleString()} SAVED`;
+        : `${n} GOAL${n === 1 ? '' : 'S'} · ${fmtMoney(Math.round(saved), {decimals: 0})} SAVED`;
     }
 
     // Debt — count + total owed across credit cards
@@ -10161,7 +10406,7 @@ init();
         try { total += getEstimatedBalance(c.id).estimated || 0; } catch (e) {}
       }
       debtEl.textContent = credit.length
-        ? `${credit.length} CARD${credit.length === 1 ? '' : 'S'} · $${Math.round(total).toLocaleString()}`
+        ? `${credit.length} CARD${credit.length === 1 ? '' : 'S'} · ${fmtMoney(Math.round(total), {decimals: 0})}`
         : 'NO CREDIT CARDS';
     }
   }
@@ -10192,6 +10437,458 @@ init();
     setupBoldObserver();
   }
 })();
+
+// ═══ DISPLAY CURRENCY (display-only USD ↔ INR) ═══════
+// All stored amounts are USD. fmtMoney converts at the cached rate when
+// displayCurrency === 'INR'. Default opts mirror the most common pattern
+// in the codebase: 2 decimals, no sign prefix.
+const FX_RATE_CACHE_KEY = 'spendlens_usd_inr_rate';
+const FX_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const FX_LOCALE = { USD: 'en-US', INR: 'en-IN' };
+const FX_SYMBOL = { USD: '$',     INR: '₹'    };
+
+(function loadCachedFxRate() {
+  try {
+    const raw = localStorage.getItem(FX_RATE_CACHE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.rate === 'number' && parsed.fetchedAt) {
+      usdInrRate = parsed.rate;
+      usdInrRateFetchedAt = parsed.fetchedAt;
+    }
+  } catch (e) {}
+})();
+
+function fmtMoney(usd, opts) {
+  const n = Number(usd);
+  if (!Number.isFinite(n)) return '—';
+  const decimals = opts && Number.isFinite(opts.decimals) ? opts.decimals : 2;
+  const cur = (opts && opts.forceCurrency) || displayCurrency || 'USD';
+  // No live rate yet → fall back to USD so the user never sees a blank or
+  // wildly wrong number. The rate fetch on app boot will catch up shortly.
+  const useInr = cur === 'INR' && Number.isFinite(usdInrRate) && usdInrRate > 0;
+  const value = useInr ? n * usdInrRate : n;
+  const symbol = useInr ? FX_SYMBOL.INR : FX_SYMBOL.USD;
+  const locale = useInr ? FX_LOCALE.INR : FX_LOCALE.USD;
+  const formatted = Math.abs(value).toLocaleString(locale, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+  const sign = value < 0 ? '-' : '';
+  return `${sign}${symbol}${formatted}`;
+}
+
+async function refreshFxRates(force) {
+  const now = Date.now();
+  const fetchedMs = usdInrRateFetchedAt ? Date.parse(usdInrRateFetchedAt) : 0;
+  if (!force && fetchedMs && (now - fetchedMs) < FX_TTL_MS) return usdInrRate;
+  try {
+    const res = await fetch('https://api.frankfurter.app/latest?from=USD&to=INR');
+    if (!res.ok) throw new Error('fx fetch ' + res.status);
+    const data = await res.json();
+    const rate = data && data.rates && Number(data.rates.INR);
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error('fx fetch: invalid payload');
+    usdInrRate = rate;
+    usdInrRateFetchedAt = new Date().toISOString();
+    try {
+      localStorage.setItem(FX_RATE_CACHE_KEY, JSON.stringify({
+        rate: usdInrRate, fetchedAt: usdInrRateFetchedAt,
+      }));
+    } catch (e) {}
+    // Persist to cloud so other devices reuse the same snapshot. Cheap —
+    // user_preferences is upserted on every flush anyway.
+    if (typeof scheduleFlush === 'function') scheduleFlush();
+    if (typeof renderAll === 'function') renderAll();
+    if (typeof renderSettingsCurrencySection === 'function') renderSettingsCurrencySection();
+    return rate;
+  } catch (e) {
+    console.warn('[fx] refresh failed', e);
+    return null;
+  }
+}
+
+function setDisplayCurrency(cur) {
+  if (cur !== 'USD' && cur !== 'INR') return;
+  if (displayCurrency === cur) return;
+  displayCurrency = cur;
+  saveToStorage();
+  if (typeof renderAll === 'function') renderAll();
+  if (typeof renderSettingsCurrencySection === 'function') renderSettingsCurrencySection();
+  // Lazy-fetch the rate the first time the user picks INR.
+  if (cur === 'INR' && (!Number.isFinite(usdInrRate) || usdInrRate <= 0)) refreshFxRates(true);
+}
+
+function renderSettingsCurrencySection() {
+  const host = document.getElementById('settingsCurrencySection');
+  if (!host) return;
+  const isInr = displayCurrency === 'INR';
+  const rateLine = Number.isFinite(usdInrRate) && usdInrRate > 0
+    ? `1 USD ≈ ₹${usdInrRate.toFixed(2)} · updated ${usdInrRateFetchedAt ? new Date(usdInrRateFetchedAt).toLocaleString() : '—'}`
+    : 'Rate not loaded yet — tap Refresh';
+  host.innerHTML = `
+    <div class="gmail-account-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <div>
+          <div class="setting-label">Display Currency</div>
+          <div class="setting-desc">All amounts are stored in USD. This only changes how they're shown.</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button onclick="setDisplayCurrency('USD')" style="padding:6px 12px;border:1px solid ${!isInr ? 'var(--accent)' : 'var(--border-strong)'};border-radius:6px;background:${!isInr ? 'var(--accent)' : 'transparent'};color:${!isInr ? '#fff' : 'var(--text-dim)'};font-size:12px;font-weight:600;cursor:pointer">USD</button>
+          <button onclick="setDisplayCurrency('INR')" style="padding:6px 12px;border:1px solid ${isInr ? 'var(--accent)' : 'var(--border-strong)'};border-radius:6px;background:${isInr ? 'var(--accent)' : 'transparent'};color:${isInr ? '#fff' : 'var(--text-dim)'};font-size:12px;font-weight:600;cursor:pointer">INR</button>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--text-muted)">${rateLine}</div>
+        <button onclick="refreshFxRates(true)" style="padding:4px 10px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text-dim);font-size:11px;font-weight:600;cursor:pointer">Refresh</button>
+      </div>
+    </div>
+  `;
+}
+
+// ═══ APP LOCK (biometric + PIN fallback) ═════════════
+// Per-device lock layered over the existing Google sign-in. Stored locally
+// so each device manages its own credentials — WebAuthn assertions are
+// device-bound anyway, and a per-device PIN avoids syncing a hashable
+// secret over the wire.
+const APPLOCK_KEYS = {
+  enabled:  'spendlens_lock_enabled',
+  salt:     'spendlens_lock_pin_salt',
+  hash:     'spendlens_lock_pin_hash',
+  credId:   'spendlens_lock_credential_id',
+  fails:    'spendlens_lock_fail_count',
+  lockUntil:'spendlens_lock_until_ms',
+};
+let appLockState = {
+  enabled: localStorage.getItem(APPLOCK_KEYS.enabled) === 'true',
+  pinBuffer: '',
+  pinMode: 'verify', // 'verify' once unlocked, 'setup' during enrollment
+};
+
+function appLockHas() { return appLockState.enabled; }
+function appLockHasBiometric() { return !!localStorage.getItem(APPLOCK_KEYS.credId); }
+
+async function _hashPin(pin, saltHex) {
+  const enc = new TextEncoder();
+  const buf = enc.encode(saltHex + ':' + pin);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function _randomHex(bytes) {
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return [...arr].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function _b64urlFromBuf(buf) {
+  const bytes = new Uint8Array(buf);
+  let str = '';
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function _b64urlToBuf(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function _setPin(pin) {
+  const salt = _randomHex(16);
+  const hash = await _hashPin(pin, salt);
+  localStorage.setItem(APPLOCK_KEYS.salt, salt);
+  localStorage.setItem(APPLOCK_KEYS.hash, hash);
+}
+
+async function _verifyPin(pin) {
+  const salt = localStorage.getItem(APPLOCK_KEYS.salt);
+  const hash = localStorage.getItem(APPLOCK_KEYS.hash);
+  if (!salt || !hash) return false;
+  const computed = await _hashPin(pin, salt);
+  return computed === hash;
+}
+
+function _appLockUpdateDots() {
+  const wrap = document.getElementById('appLockPinDots');
+  if (!wrap) return;
+  const len = appLockState.pinBuffer.length;
+  // Show 6 slots — UX hint that 4-6 digits are valid.
+  wrap.innerHTML = Array.from({ length: 6 }).map((_, i) =>
+    `<div class="app-lock-pin-dot${i < len ? ' filled' : ''}"></div>`).join('');
+}
+
+function _appLockKeypadHtml() {
+  return [
+    ['1','2','3'],
+    ['4','5','6'],
+    ['7','8','9'],
+    ['',''+'0',''],
+  ].map(row => row.map((d, i) => {
+    if (d === '') {
+      // Bottom-left empty / bottom-right backspace
+      if (i === 2) return `<button class="app-lock-key action" onclick="appLockKey('back')">⌫</button>`;
+      return `<button class="app-lock-key empty" tabindex="-1"></button>`;
+    }
+    return `<button class="app-lock-key" onclick="appLockKey('${d}')">${d}</button>`;
+  }).join('')).join('');
+}
+
+let _pinDebounceTimer = null;
+let _appLockSubmitting = false;
+
+function appLockKey(key) {
+  const errEl = document.getElementById('appLockError');
+  if (errEl) errEl.textContent = '';
+  if (key === 'back') {
+    appLockState.pinBuffer = appLockState.pinBuffer.slice(0, -1);
+    _appLockUpdateDots();
+    if (_pinDebounceTimer) { clearTimeout(_pinDebounceTimer); _pinDebounceTimer = null; }
+    return;
+  }
+  if (appLockState.pinBuffer.length >= 6) return;
+  appLockState.pinBuffer += key;
+  _appLockUpdateDots();
+  // Reset the debounce on every keystroke. PINs 4-5 digits long submit
+  // after the user pauses for ~600ms. A 6-digit PIN submits immediately
+  // because we know there's no more input coming.
+  if (_pinDebounceTimer) { clearTimeout(_pinDebounceTimer); _pinDebounceTimer = null; }
+  if (appLockState.pinBuffer.length === 6) {
+    _appLockSubmit();
+  } else if (appLockState.pinBuffer.length >= 4) {
+    _pinDebounceTimer = setTimeout(_appLockSubmit, 600);
+  }
+}
+
+async function _appLockSubmit() {
+  _pinDebounceTimer = null;
+  if (_appLockSubmitting) return;
+  if (appLockState.pinBuffer.length < 4) return;
+  _appLockSubmitting = true;
+  try {
+    const pin = appLockState.pinBuffer;
+    const ok = await _verifyPin(pin);
+    if (ok) {
+      _appLockResetFails();
+      appLockState.pinBuffer = '';
+      hideAppLockScreen();
+    } else {
+      const fails = _appLockBumpFails();
+      appLockState.pinBuffer = '';
+      _appLockUpdateDots();
+      const errEl = document.getElementById('appLockError');
+      if (errEl) errEl.textContent = fails >= 3 ? 'Too many tries — wait 30s' : 'Wrong PIN';
+      if (fails >= 3) {
+        const lockedUntil = Date.now() + 30_000;
+        localStorage.setItem(APPLOCK_KEYS.lockUntil, String(lockedUntil));
+        _appLockApplyCooldown();
+      }
+    }
+  } finally {
+    _appLockSubmitting = false;
+  }
+}
+
+function _appLockBumpFails() {
+  const n = (parseInt(localStorage.getItem(APPLOCK_KEYS.fails) || '0', 10) || 0) + 1;
+  localStorage.setItem(APPLOCK_KEYS.fails, String(n));
+  return n;
+}
+function _appLockResetFails() {
+  localStorage.removeItem(APPLOCK_KEYS.fails);
+  localStorage.removeItem(APPLOCK_KEYS.lockUntil);
+}
+function _appLockApplyCooldown() {
+  const until = parseInt(localStorage.getItem(APPLOCK_KEYS.lockUntil) || '0', 10);
+  const remaining = until - Date.now();
+  const keypad = document.getElementById('appLockKeypad');
+  if (!keypad) return;
+  if (remaining > 0) {
+    keypad.style.pointerEvents = 'none';
+    keypad.style.opacity = '0.4';
+    setTimeout(() => {
+      keypad.style.pointerEvents = '';
+      keypad.style.opacity = '';
+      _appLockResetFails();
+      const errEl = document.getElementById('appLockError');
+      if (errEl) errEl.textContent = '';
+    }, remaining);
+  }
+}
+
+async function appLockTryBiometric() {
+  const credId = localStorage.getItem(APPLOCK_KEYS.credId);
+  if (!credId || !window.PublicKeyCredential) return false;
+  try {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [{ id: _b64urlToBuf(credId), type: 'public-key' }],
+        userVerification: 'required',
+        timeout: 60_000,
+        rpId: location.hostname || undefined,
+      },
+    });
+    if (assertion) {
+      _appLockResetFails();
+      hideAppLockScreen();
+      return true;
+    }
+  } catch (e) {
+    console.warn('[applock] biometric failed', e);
+    const errEl = document.getElementById('appLockError');
+    if (errEl) errEl.textContent = 'Biometric failed — use PIN';
+  }
+  return false;
+}
+
+function showAppLockScreen() {
+  const overlay = document.getElementById('appLockOverlay');
+  if (!overlay) return;
+  appLockState.pinBuffer = '';
+  const keypad = document.getElementById('appLockKeypad');
+  if (keypad) keypad.innerHTML = _appLockKeypadHtml();
+  _appLockUpdateDots();
+  const bioBtn = document.getElementById('appLockBioBtn');
+  if (bioBtn) bioBtn.style.display = appLockHasBiometric() ? '' : 'none';
+  overlay.classList.add('open');
+  _appLockApplyCooldown();
+  // Auto-prompt biometric if available — user can still cancel and use PIN.
+  if (appLockHasBiometric()) appLockTryBiometric();
+}
+
+function hideAppLockScreen() {
+  const overlay = document.getElementById('appLockOverlay');
+  if (overlay) overlay.classList.remove('open');
+  sessionStorage.setItem('spendlens_unlocked', 'true');
+}
+
+function initAppLock() {
+  if (!appLockHas()) return;
+  if (sessionStorage.getItem('spendlens_unlocked') === 'true') return;
+  showAppLockScreen();
+}
+
+// ── PIN setup flow (Settings → Security) ──
+function openPinSetupModal(forEnable) {
+  document.getElementById('pinSetupModal').classList.add('open');
+  document.getElementById('pinSetupTitle').textContent = forEnable ? 'Set a PIN' : 'Change PIN';
+  document.getElementById('pinSetupSub').textContent = 'Choose a 4–6 digit PIN to unlock the app.';
+  document.getElementById('pinSetupNew').value = '';
+  document.getElementById('pinSetupConfirm').value = '';
+  document.getElementById('pinSetupError').textContent = '';
+  appLockState._enablingAfterSetup = !!forEnable;
+}
+
+async function savePinSetup() {
+  const pin = document.getElementById('pinSetupNew').value;
+  const confirm = document.getElementById('pinSetupConfirm').value;
+  const errEl = document.getElementById('pinSetupError');
+  if (!/^\d{4,6}$/.test(pin)) { errEl.textContent = 'PIN must be 4–6 digits'; return; }
+  if (pin !== confirm)        { errEl.textContent = "PINs don't match"; return; }
+  await _setPin(pin);
+  if (appLockState._enablingAfterSetup) {
+    appLockState.enabled = true;
+    localStorage.setItem(APPLOCK_KEYS.enabled, 'true');
+  }
+  closeModal('pinSetupModal');
+  renderSettingsSecuritySection();
+  showSyncBar('success', '🔒', 'PIN saved');
+}
+
+async function enableBiometricForLock() {
+  if (!window.PublicKeyCredential || !navigator.credentials?.create) {
+    alert('Biometric login not supported on this device/browser.');
+    return;
+  }
+  try {
+    const userId = new Uint8Array(16);
+    crypto.getRandomValues(userId);
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: 'SpendLens', id: location.hostname || undefined },
+        user: { id: userId, name: 'spendlens-user', displayName: 'SpendLens user' },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7  },  // ES256
+          { type: 'public-key', alg: -257 }, // RS256
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'preferred',
+        },
+        timeout: 60_000,
+        attestation: 'none',
+      },
+    });
+    if (!cred) throw new Error('No credential created');
+    localStorage.setItem(APPLOCK_KEYS.credId, _b64urlFromBuf(cred.rawId));
+    renderSettingsSecuritySection();
+    showSyncBar('success', '🔐', 'Biometric enrolled for this device');
+  } catch (e) {
+    console.warn('[applock] enroll failed', e);
+    alert('Could not enroll biometric: ' + (e.message || 'unknown'));
+  }
+}
+
+function disableBiometricForLock() {
+  localStorage.removeItem(APPLOCK_KEYS.credId);
+  renderSettingsSecuritySection();
+}
+
+function disableAppLock() {
+  if (!confirm('Disable app lock? You\'ll no longer need a PIN or biometric to open SpendLens.')) return;
+  appLockState.enabled = false;
+  localStorage.removeItem(APPLOCK_KEYS.enabled);
+  localStorage.removeItem(APPLOCK_KEYS.salt);
+  localStorage.removeItem(APPLOCK_KEYS.hash);
+  localStorage.removeItem(APPLOCK_KEYS.credId);
+  // Clear the in-tab unlock flag too. Otherwise re-enabling in the same
+  // session would inherit a stale "unlocked" sessionStorage entry and skip
+  // the lock screen on the next reload until the tab is closed.
+  sessionStorage.removeItem('spendlens_unlocked');
+  _appLockResetFails();
+  renderSettingsSecuritySection();
+  showSyncBar('success', '🔓', 'App lock disabled');
+}
+
+function renderSettingsSecuritySection() {
+  const host = document.getElementById('settingsSecuritySection');
+  if (!host) return;
+  const enabled = appLockHas();
+  const hasBio = appLockHasBiometric();
+  const supported = !!(window.PublicKeyCredential && navigator.credentials?.create);
+  const enablePinBtn = enabled
+    ? `<button onclick="openPinSetupModal(false)" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text-dim);font-size:12px;font-weight:600;cursor:pointer">Change PIN</button>
+       <button onclick="disableAppLock()" style="padding:6px 12px;border:1px solid var(--red);border-radius:6px;background:transparent;color:var(--red);font-size:12px;font-weight:600;cursor:pointer">Disable</button>`
+    : `<button onclick="openPinSetupModal(true)" style="padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:var(--accent);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Enable</button>`;
+  const bioBtn = !enabled ? '' : (hasBio
+    ? `<button onclick="disableBiometricForLock()" style="padding:6px 12px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text-dim);font-size:12px;font-weight:600;cursor:pointer">Remove biometric</button>`
+    : (supported
+      ? `<button onclick="enableBiometricForLock()" style="padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);font-size:12px;font-weight:600;cursor:pointer">Enable Face / Touch ID</button>`
+      : `<span style="font-size:11px;color:var(--text-muted)">Not supported on this device</span>`));
+  host.innerHTML = `
+    <div class="gmail-account-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <div>
+          <div class="setting-label">App Lock</div>
+          <div class="setting-desc">${enabled ? 'Require PIN' + (hasBio ? ' or Face / Touch ID' : '') + ' to open SpendLens on this device.' : 'Off — anyone with this device can open SpendLens.'}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">${enablePinBtn}</div>
+      </div>
+      ${enabled ? `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--text-muted)">Biometric ${hasBio ? 'enabled' : 'not enrolled on this device'}</div>
+        ${bioBtn}
+      </div>` : ''}
+    </div>
+  `;
+}
 
 // ═══ THEME TOGGLE ═══════════════════════════════════
 function toggleTheme() {
@@ -10230,6 +10927,15 @@ function isCashAccount(card) {
 
 function getCashAccounts() {
   return CARDS.filter(isCashAccount);
+}
+
+function getDefaultCashAccountId() {
+  const accounts = getCashAccounts();
+  const checking = accounts.find(a => a.type === 'bank' && a.accountSubtype === 'checking');
+  if (checking) return checking.id;
+  const firstBank = accounts.find(a => a.type === 'bank');
+  if (firstBank) return firstBank.id;
+  return accounts[0]?.id || null;
 }
 
 function totalCashOnHand() {
@@ -10394,7 +11100,7 @@ function renderCashTile() {
       <div class="cash-card-icon balance">🏦</div>
       <div class="cash-card-label">Cash on Hand</div>
     </div>
-    <div class="cash-card-value">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+    <div class="cash-card-value">${fmtMoney(total)}</div>
     <div class="cash-card-sub">Across ${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
   `;
 
@@ -10413,9 +11119,9 @@ function renderCashTile() {
     const valueColor = up ? 'var(--green)' : 'var(--red)';
     const sign = up ? '+' : '−';
     const pctText = (trend.pctChange == null)
-      ? `${sign}$${Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 })}`
-      : `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% (${sign}$${Math.abs(trend.delta).toLocaleString('en-US', { maximumFractionDigits: 0 })})`;
-    const fmtAmt = (n) => '$' + Math.abs(Math.round(n)).toLocaleString('en-US');
+      ? `${sign}${fmtMoney(Math.abs(trend.delta), {decimals: 0})}`
+      : `${trend.pctChange >= 0 ? '+' : ''}${trend.pctChange.toFixed(1)}% (${sign}${fmtMoney(Math.abs(trend.delta), {decimals: 0})})`;
+    const fmtAmt = (n) => fmtMoney(Math.abs(Math.round(n)), {decimals: 0});
     const breakdownParts = [
       `+${fmtAmt(trend.forwardIncome)} in`,
       `−${fmtAmt(trend.avgMonthlyExpense * 3)} out`,
@@ -10426,7 +11132,7 @@ function renderCashTile() {
         <div class="cash-card-icon ${up ? 'projected' : 'projected-down'}">${up ? '📈' : '📉'}</div>
         <div class="cash-card-label">Projected · 3 mo</div>
       </div>
-      <div class="cash-card-value">$${trend.projected3mo.toLocaleString('en-US', { maximumFractionDigits: 0 })}</div>
+      <div class="cash-card-value">${fmtMoney(trend.projected3mo, {decimals: 0})}</div>
       <div class="cash-card-sub" style="color:${valueColor};font-weight:600">${pctText}</div>
       <div class="cash-card-sub-tiny">${breakdownParts.join(' · ')}</div>
     `;
@@ -10453,7 +11159,7 @@ function renderAccountsPage() {
       const total = totalCashOnHand();
       heroEl.innerHTML = `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:var(--radius);padding:18px">
         <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted)">Total Cash on Hand</div>
-        <div style="font-family:var(--font-mono);font-size:32px;font-weight:600;letter-spacing:-0.02em;color:var(--green);font-variant-numeric:tabular-nums lining-nums;margin-top:4px">$${total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+        <div style="font-family:var(--font-mono);font-size:32px;font-weight:600;letter-spacing:-0.02em;color:var(--green);font-variant-numeric:tabular-nums lining-nums;margin-top:4px">${fmtMoney(total)}</div>
         <div style="font-size:12px;color:var(--text-dim);margin-top:4px">${accounts.length} account${accounts.length === 1 ? '' : 's'}</div>
       </div>`;
     }
@@ -10473,8 +11179,11 @@ function renderAccountsPage() {
           <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${sub} · •••• ${a.last4} · Updated ${updated}</div>
         </div>
         <div style="text-align:right">
-          <div style="font-family:var(--font-mono);font-weight:600;font-size:18px;font-variant-numeric:tabular-nums lining-nums">$${bal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-          <button onclick="openSetAccountBalanceModal('${a.id}')" style="margin-top:4px;padding:4px 10px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer">Update</button>
+          <div style="font-family:var(--font-mono);font-weight:600;font-size:18px;font-variant-numeric:tabular-nums lining-nums">${fmtMoney(bal)}</div>
+          <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px">
+            <button onclick="openAdjustAccountBalanceModal('${a.id}')" style="padding:4px 10px;border:1px solid var(--border-strong);border-radius:6px;background:transparent;color:var(--text-dim);font-size:11px;font-weight:600;cursor:pointer">+/−</button>
+            <button onclick="openSetAccountBalanceModal('${a.id}')" style="padding:4px 10px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);font-size:11px;font-weight:600;cursor:pointer">Update</button>
+          </div>
         </div>
       </div>`;
     }).join('');
@@ -10515,7 +11224,7 @@ function renderScheduleRow(s) {
       <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${KIND_LABEL[s.kind]} · ${cadence} · ${tail}</div>
     </div>
     <div style="text-align:right">
-      <div style="font-family:var(--font-mono);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums lining-nums">$${(s.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+      <div style="font-family:var(--font-mono);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums lining-nums">${fmtMoney((s.amount || 0))}</div>
       <div style="display:flex;gap:4px;justify-content:flex-end;margin-top:4px">
         <button onclick="openScheduleModal('${s.id}')" style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:transparent;color:var(--text-dim);font-size:10px;font-weight:600;cursor:pointer">Edit</button>
         <button onclick="deleteSchedule('${s.id}')" style="padding:3px 8px;border:1px solid var(--border-strong);border-radius:5px;background:transparent;color:var(--red);font-size:10px;font-weight:600;cursor:pointer">✕</button>
@@ -10548,7 +11257,75 @@ function saveAccountBalance() {
   closeModal('setAccountBalanceModal');
   renderAccountsPage();
   renderCashTile();
-  showSyncBar('success', '🏦', `Balance updated to <strong>$${amt.toFixed(2)}</strong>`);
+  showSyncBar('success', '🏦', `Balance updated to <strong>${fmtMoney(amt)}</strong>`);
+}
+
+// ─── Adjust Account Balance (one-off credit/debit) ────────────────────
+let adjustDirection = 'in';
+
+function setAdjustDirection(dir) {
+  adjustDirection = dir;
+  const inBtn  = document.getElementById('adjustDirIn');
+  const outBtn = document.getElementById('adjustDirOut');
+  if (!inBtn || !outBtn) return;
+  if (dir === 'in') {
+    inBtn.style.background  = 'var(--green-soft)';
+    inBtn.style.color       = 'var(--green)';
+    outBtn.style.background = 'transparent';
+    outBtn.style.color      = 'var(--text-dim)';
+  } else {
+    outBtn.style.background = 'var(--red-soft)';
+    outBtn.style.color      = 'var(--red)';
+    inBtn.style.background  = 'transparent';
+    inBtn.style.color       = 'var(--text-dim)';
+  }
+}
+
+function openAdjustAccountBalanceModal(accountId) {
+  const a = CARDS.find(c => c.id === accountId);
+  if (!a) return;
+  document.getElementById('adjustAccountBalanceModal').classList.add('open');
+  document.getElementById('adjustAccountBalanceName').innerHTML = `<strong>${a.name}</strong> •••• ${a.last4}`;
+  document.getElementById('adjustAccountId').value = accountId;
+  document.getElementById('adjustAmount').value = '';
+  document.getElementById('adjustNote').value = '';
+  const catSel = document.getElementById('adjustCategory');
+  if (catSel) {
+    catSel.innerHTML = ADJUSTMENT_CATEGORIES.map(c =>
+      `<option value="${c.id}"${c.id === 'other' ? ' selected' : ''}>${c.label}</option>`).join('');
+  }
+  const dateEl = document.getElementById('adjustDate');
+  if (dateEl) dateEl.value = ptDateStr();
+  setAdjustDirection('in');
+}
+
+function saveAdjustAccountBalance() {
+  const id = document.getElementById('adjustAccountId').value;
+  const amt = parseFloat(document.getElementById('adjustAmount').value);
+  const note = document.getElementById('adjustNote').value.trim();
+  const category = document.getElementById('adjustCategory')?.value || 'other';
+  const adjustedAt = document.getElementById('adjustDate')?.value || ptDateStr();
+  if (!id || !Number.isFinite(amt) || amt <= 0) { alert('Enter a positive amount'); return; }
+  const delta = adjustDirection === 'in' ? +amt : -amt;
+  // Append the audit row first so the next saveToStorage (inside
+  // adjustAccountBalance) carries it to the cloud flush.
+  balanceAdjustments.unshift({
+    id: crypto.randomUUID(),
+    accountId: id,
+    direction: adjustDirection,
+    amount: amt,
+    category,
+    note: note || null,
+    adjustedAt,
+    createdAt: new Date().toISOString(),
+  });
+  adjustAccountBalance(id, delta);
+  closeModal('adjustAccountBalanceModal');
+  renderAccountsPage();
+  const sign = delta > 0 ? '+' : '−';
+  const flavor = delta > 0 ? '💵' : '💸';
+  const catLabel = (ADJUSTMENT_CATEGORIES.find(c => c.id === category) || {}).label || 'Other';
+  showSyncBar('success', flavor, `${sign}${fmtMoney(amt)} · ${catLabel}${note ? ' · ' + note : ''}`);
 }
 
 // ─── Schedule modal ───────────────────────────────────────────────────
@@ -10675,15 +11452,17 @@ function saveSchedule() {
   if (editId) {
     const s = scheduledMovements.find(x => x.id === editId);
     if (s) {
-      // Reset lastAppliedPeriod when frequency switches — the period
-      // namespaces (m: vs w:) aren't comparable so a stale value would
-      // either over- or under-fire on the new cadence.
+      // Reset lastAppliedPeriod when the cadence OR the day-of-period
+      // changes — moving a Thursday weekly to Friday in the same week
+      // would otherwise stay stuck because the gate at the top of
+      // applyAutoSchedules thinks the schedule already ran this period.
       const freqChanged = (s.frequency || 'monthly') !== frequency;
+      const dayChanged = s.dayOfMonth !== monthDay || s.dayOfWeek !== weekDay;
       Object.assign(s, {
         kind, label, amount, frequency,
         dayOfMonth: monthDay, dayOfWeek: weekDay,
         sourceAccountId, targetAccountId, cardId, note, autoApply,
-        ...(freqChanged ? { lastAppliedPeriod: null } : {}),
+        ...(freqChanged || dayChanged ? { lastAppliedPeriod: null } : {}),
       });
     }
   } else {
@@ -10696,6 +11475,10 @@ function saveSchedule() {
   }
   saveToStorage();
   closeModal('scheduleModal');
+  // Fire any auto-apply schedule that's now due — covers a brand-new
+  // schedule whose day is today/past, and an edit that moved the day
+  // backward (lastAppliedPeriod was just reset above).
+  if (autoApply && typeof applyAutoSchedules === 'function') applyAutoSchedules();
   renderAccountsPage();
   renderCashFlowCalendar();
   showSyncBar('success', '📅', `Schedule <strong>${label}</strong> saved`);
@@ -10833,7 +11616,10 @@ function applyOneSchedule(s, periodKey, effectiveDay) {
     incomeEntries.push({
       id: crypto.randomUUID(),
       amount: s.amount,
-      source: 'other',
+      // Default scheduled income to 'salary' — most common case. Past
+      // entries created with 'other' get retagged on load by
+      // _migrateScheduledIncomeSource() when they match a live schedule.
+      source: 'salary',
       date: dateStr,
       note: s.label,
       frequency: 'once',
@@ -11279,7 +12065,7 @@ function showStatementPreview(newOnes, skipped, errors) {
           <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.merchant.replace(/</g, '&lt;')}</div>
           <div style="font-size:11px;color:var(--text-dim)">${c.date}${c.last4 ? ' · •••• ' + c.last4 : ''}${c._sourceFile ? ' · ' + c._sourceFile : ''}</div>
         </div>
-        <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:13px;font-variant-numeric:tabular-nums">$${Number(c.amount).toFixed(2)}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:13px;font-variant-numeric:tabular-nums">${fmtMoney(Number(c.amount))}</div>
       </label>
     `).join('');
     listEl.innerHTML = `<div style="font-size:11px;font-weight:700;letter-spacing:0.06em;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">New charges (uncheck to skip)</div>${rowsHtml}`;
