@@ -6829,9 +6829,30 @@ function renderSettingsGmailSection() {
       </div>
       <div class="gmail-account-actions">
         <button class="gmail-action-btn primary" onclick="syncGmail(false)">🔄 Sync Now</button>
+        <button class="gmail-action-btn" onclick="setRepsPassword()">🔑 Set REPS password</button>
         <button class="gmail-action-btn danger" onclick="signOutGoogle()">Disconnect</button>
       </div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5">"Set REPS password" gives your Google-linked account a password so you can sign in to REPS as a PWA, where Google OAuth can't redirect back. Use the same email + this password in REPS.</p>
     </div>`;
+  }
+}
+
+async function setRepsPassword() {
+  if (!supabaseClient || !currentUserId) {
+    alert("Sign in with Google first.");
+    return;
+  }
+  const pw = prompt("Set a password for REPS sign-in (at least 6 characters):", "");
+  if (!pw) return;
+  if (pw.length < 6) { alert("Password must be at least 6 characters."); return; }
+  const confirm2 = prompt("Re-enter to confirm:", "");
+  if (confirm2 !== pw) { alert("Passwords don't match."); return; }
+  try {
+    const { error } = await supabaseClient.auth.updateUser({ password: pw });
+    if (error) throw error;
+    alert("Done. In REPS, sign in with " + gmailUser.email + " + this password.");
+  } catch (e) {
+    alert("Failed: " + (e.message || e));
   }
 }
 
