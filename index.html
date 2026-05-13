@@ -934,6 +934,53 @@ body {
   gap: 10px;
   margin-bottom: 14px;
 }
+/* Guilt-Free Wallet card — REPS reward fund mirrored via guilt_free_wallet */
+.gfw-card {
+  background: linear-gradient(160deg, var(--bg-card) 0%, rgba(127,169,201,0.10) 130%);
+  border: 1px solid rgba(127,169,201,0.35);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s, box-shadow 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.gfw-card:active { transform: scale(0.995); }
+.gfw-card::after {
+  content: ""; position: absolute; top: -30px; right: -30px;
+  width: 140px; height: 140px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(127,169,201,0.18), transparent 70%);
+  pointer-events: none;
+}
+.gfw-card-row { display: flex; align-items: center; justify-content: space-between; }
+.gfw-card-label {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
+  color: var(--text-muted); text-transform: uppercase;
+}
+.gfw-card-source {
+  font-size: 11px; color: #7FA9C9; letter-spacing: 0.2px; font-weight: 500;
+}
+.gfw-card-balance {
+  font-family: var(--font-display, Georgia, serif);
+  font-size: 32px; font-weight: 600; letter-spacing: -1px;
+  color: var(--text); margin-top: 4px; font-variant-numeric: tabular-nums;
+}
+.gfw-card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+/* GFW modal — listing the reward txns and spend action */
+.gfw-modal-list { max-height: 50vh; overflow-y: auto; }
+.gfw-txn {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.gfw-txn:last-child { border-bottom: none; }
+.gfw-txn-body { flex: 1; min-width: 0; }
+.gfw-txn-source { font-size: 14px; font-weight: 500; color: var(--text); }
+.gfw-txn-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.gfw-txn-amt { font-family: var(--font-mono, monospace); font-weight: 600; font-variant-numeric: tabular-nums; }
+.gfw-txn-amt.pos { color: #6B8E55; }
+.gfw-txn-amt.neg { color: var(--accent, #C26B5A); }
 .cash-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -3783,6 +3830,18 @@ select.form-input {
     <div id="cashCardProjected" class="cash-card" onclick="navTo('pageAccounts')"></div>
   </div>
 
+  <!-- ═══ GUILT-FREE WALLET (REPS reward fund — shared via guilt_free_wallet table) ═══ -->
+  <div id="guiltFreeWalletCard" class="gfw-card" style="display:none" onclick="openGuiltFreeWallet()">
+    <div class="gfw-card-inner">
+      <div class="gfw-card-row">
+        <div class="gfw-card-label">Guilt-Free Wallet</div>
+        <div class="gfw-card-source">from REPS</div>
+      </div>
+      <div class="gfw-card-balance" id="gfwBalance">$0.00</div>
+      <div class="gfw-card-sub" id="gfwSub">Earned by showing up — spend without guilt</div>
+    </div>
+  </div>
+
   <!-- ═══ HEADER: eyebrow date + status pill ═══ -->
   <div class="bold-head">
     <div class="bold-eyebrow" id="boldDateEyebrow"></div>
@@ -4290,6 +4349,21 @@ select.form-input {
 </div>
 
 <!-- Income -->
+<!-- Guilt-Free Wallet detail (shared with REPS via guilt_free_wallet) -->
+<div class="modal-overlay" id="guiltFreeWalletModal" onclick="if(event.target===this)closeModal('guiltFreeWalletModal')">
+  <div class="modal">
+    <div class="modal-top"><h2>Guilt-Free Wallet</h2><button class="modal-close" onclick="closeModal('guiltFreeWalletModal')">✕</button></div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Earned in REPS · spend here without guilt</p>
+    <div id="gfwModalBalance" style="font-family:var(--font-display,Georgia,serif);font-size:44px;font-weight:600;letter-spacing:-1.5px;color:var(--text);margin-bottom:10px;font-variant-numeric:tabular-nums">$0.00</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="submit-btn" style="flex:1" onclick="promptSpendGuiltFree()">Spend</button>
+      <a class="submit-btn" style="flex:1;text-align:center;text-decoration:none;background:transparent;color:var(--text);border:1px solid var(--border)" href="https://aspurand.github.io/Reps/" target="_blank" rel="noopener">Open REPS</a>
+    </div>
+    <div class="form-label" style="margin-bottom:6px">Recent activity</div>
+    <div class="gfw-modal-list" id="gfwModalList"></div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="addIncomeModal" onclick="if(event.target===this)closeModal('addIncomeModal')">
   <div class="modal">
     <div class="modal-top"><h2>Log Income</h2><button class="modal-close" onclick="closeModal('addIncomeModal')">✕</button></div>
@@ -5208,6 +5282,8 @@ async function onSupabaseSignIn(session) {
   // migration failed (keep user on their local data; don't overwrite with
   // partially-uploaded cloud state).
   if (!justMigrated && !migrationFailed) await loadFromCloud();
+  // Pull REPS rewards into the dashboard widget (cheap, independent of main load)
+  loadGuiltFreeWallet();
   // Dedupe any rows that accidentally duplicated in earlier versions
   dedupeTransactions();
   // Now that we have authoritative state, auto-post any due subscription charges
@@ -7575,6 +7651,147 @@ function closeSidePanel() {
 }
 function navTo(id) { showPage(id); closeSidePanel(); }
 
+// ═══════════════════════════════════════════════════════════════════
+// Guilt-Free Wallet — REPS deposits rewards here; SpendLens shows balance
+// and lets you spend it without polluting normal income/spend stats.
+// Shared via the `guilt_free_wallet` table on the same Supabase project.
+// ═══════════════════════════════════════════════════════════════════
+let gfwTxns = [];
+const GFW_SOURCE_LABELS = {
+  workout: 'Workout complete',
+  streak_bonus: 'Streak bonus',
+  weekly_goal: 'Weekly goal',
+  pr_bonus: 'New personal record',
+  cardio: 'Cardio session',
+  manual_deposit: 'Deposit',
+  spend: 'Spent',
+  adjustment: 'Adjustment',
+};
+
+async function loadGuiltFreeWallet() {
+  if (!currentUserId) return;
+  try {
+    const rows = await sbSelect('guilt_free_wallet', 'select=*&order=occurred_at.desc&limit=500');
+    gfwTxns = (rows || []).map(r => ({
+      id: r.id, amount: Number(r.amount), source: r.source,
+      description: r.description, reference_id: r.reference_id,
+      occurred_at: r.occurred_at,
+    }));
+    renderGuiltFreeWalletCard();
+  } catch (e) {
+    console.warn('guilt_free_wallet load failed', e);
+  }
+}
+
+function gfwBalance() {
+  return gfwTxns.reduce((t, x) => t + Number(x.amount || 0), 0);
+}
+
+function renderGuiltFreeWalletCard() {
+  const card = document.getElementById('guiltFreeWalletCard');
+  const bal = document.getElementById('gfwBalance');
+  if (!card || !bal) return;
+  const balance = gfwBalance();
+  // Hide entirely if there's never been a deposit — keeps the dashboard
+  // clean for users who don't use REPS.
+  if (gfwTxns.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  bal.textContent = '$' + balance.toFixed(2);
+  const sub = document.getElementById('gfwSub');
+  if (sub) {
+    const earned = gfwTxns.filter(t => t.amount > 0).reduce((a,t) => a + t.amount, 0);
+    sub.textContent = balance > 0
+      ? 'Earned by showing up — tap to spend without guilt'
+      : `Earned $${earned.toFixed(0)} all-time · empty for now`;
+  }
+}
+
+async function spendFromGuiltFreeWallet(amount, description) {
+  if (!currentUserId || !amount || amount <= 0) return false;
+  const row = {
+    user_id: currentUserId,
+    amount: -Math.abs(Number(amount)),
+    source: 'spend',
+    description: description || 'Spent from guilt-free wallet',
+    occurred_at: new Date().toISOString(),
+  };
+  try {
+    const url = SUPABASE_URL + '/rest/v1/guilt_free_wallet';
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + (supabaseAccessToken || SUPABASE_ANON_KEY),
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify(row),
+    });
+    if (!r.ok) throw new Error('spend failed: ' + r.status);
+    const data = await r.json();
+    if (Array.isArray(data) && data[0]) gfwTxns.unshift({ ...data[0], amount: Number(data[0].amount) });
+    renderGuiltFreeWalletCard();
+    if (typeof renderGuiltFreeWalletModal === 'function') renderGuiltFreeWalletModal();
+    return true;
+  } catch (e) {
+    console.error('spendFromGuiltFreeWallet', e);
+    alert("Couldn't spend right now: " + e.message);
+    return false;
+  }
+}
+
+function openGuiltFreeWallet() {
+  const modal = document.getElementById('guiltFreeWalletModal');
+  if (!modal) return;
+  renderGuiltFreeWalletModal();
+  modal.classList.add('open');
+}
+
+function renderGuiltFreeWalletModal() {
+  const bal = document.getElementById('gfwModalBalance');
+  const list = document.getElementById('gfwModalList');
+  if (!bal || !list) return;
+  const balance = gfwBalance();
+  bal.textContent = '$' + balance.toFixed(2);
+  list.innerHTML = '';
+  if (gfwTxns.length === 0) {
+    list.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:24px 0">No activity yet. Open REPS and finish a workout to earn your first reward.</p>';
+    return;
+  }
+  for (const t of gfwTxns.slice(0, 50)) {
+    const row = document.createElement('div');
+    row.className = 'gfw-txn';
+    const sign = t.amount >= 0 ? '+' : '−';
+    const cls = t.amount >= 0 ? 'pos' : 'neg';
+    row.innerHTML =
+      '<div class="gfw-txn-body">' +
+      '  <div class="gfw-txn-source">' + (GFW_SOURCE_LABELS[t.source] || t.source) + '</div>' +
+      (t.description ? '  <div class="gfw-txn-desc">' + escapeHtml(t.description) + '</div>' : '') +
+      '</div>' +
+      '<div class="text-right">' +
+      '  <div class="gfw-txn-amt ' + cls + '">' + sign + '$' + Math.abs(t.amount).toFixed(2) + '</div>' +
+      '  <div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + (t.occurred_at || '').slice(0,10) + '</div>' +
+      '</div>';
+    list.appendChild(row);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function promptSpendGuiltFree() {
+  const balance = gfwBalance();
+  if (balance <= 0) { alert("Your wallet is empty. Finish a REPS workout to earn rewards."); return; }
+  const amtStr = prompt('How much would you like to spend? (max $' + balance.toFixed(2) + ')', balance.toFixed(2));
+  if (!amtStr) return;
+  const amt = parseFloat(amtStr);
+  if (!isFinite(amt) || amt <= 0) { alert("Enter a positive amount."); return; }
+  if (amt > balance + 0.01) { alert("You only have $" + balance.toFixed(2) + " available."); return; }
+  const desc = prompt('What did you spend it on? (optional)', '') || 'Treat';
+  spendFromGuiltFreeWallet(amt, desc);
+}
+
 function updateSidePanel() {
   const nameEl=document.getElementById('spName');
   const emailEl=document.getElementById('spEmail');
@@ -7619,6 +7836,7 @@ function showPage(id, btn) {
   if(id==='pageDebt') renderDebtPlanner();
   if(id==='pagePayments') renderPaymentsPage();
   if(id==='pageAccounts') renderAccountsPage();
+  if(id==='pageDashboard') { loadGuiltFreeWallet(); }
 }
 
 function exportData() {
@@ -7768,7 +7986,7 @@ function savePayment(cardId,source,amount=null,date=null){
   if(!cardPayments[cardId])cardPayments[cardId]=[];
   const exists=cardPayments[cardId].some(p=>p.date===payDate&&Math.abs(p.amount-payAmt)<0.01);
   if(!exists){
-    const sourceAccountId = source === 'manual' ? getDefaultCashAccountId() : null;
+    const sourceAccountId = (source === 'manual' || source === 'sage') ? getDefaultCashAccountId() : null;
     cardPayments[cardId].unshift({id:crypto.randomUUID(),date:payDate,amount:payAmt,source,sourceAccountId});
     if(cardPayments[cardId].length>20)cardPayments[cardId].pop();
     if(sourceAccountId) adjustAccountBalance(sourceAccountId, -payAmt);
@@ -8813,11 +9031,66 @@ function sageBuildContext() {
   monthTx.forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
   const monthSpend = monthTx.reduce((s, t) => s + t.amount, 0);
 
-  const recentTx = transactions.slice(-30).map(t => ({
+  const recentTx = [...transactions]
+    .sort((a, b) => ((b.date || '') + (b.time || '')).localeCompare((a.date || '') + (a.time || '')))
+    .slice(0, 30)
+    .map(t => ({
     date: t.date, merchant: t.merchant, amount: +t.amount.toFixed(2), category: t.category,
   }));
 
   const incomeMonth = (incomeEntries || []).filter(i => i.date >= monthStart).reduce((s, i) => s + (i.amount || 0), 0);
+  const cashAccounts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit').map(c => ({
+    id: c.id,
+    name: c.name,
+    type: c.type,
+    subtype: c.accountSubtype || null,
+    balance: +(cardBalances[c.id]?.statementBalance || 0).toFixed(2),
+    last_updated: cardBalances[c.id]?.lastUpdated || null,
+  }));
+  const creditCards = CARDS.filter(c => (c.type || 'credit') === 'credit').map(c => {
+    const est = (typeof getEstimatedBalance === 'function') ? getEstimatedBalance(c.id) : null;
+    return {
+      id: c.id,
+      name: c.name,
+      last4: c.last4,
+      credit_limit: Number(c.creditLimit) || 0,
+      pay_day: Number(c.payDay) || 0,
+      statement_balance: +(cardBalances[c.id]?.statementBalance || 0).toFixed(2),
+      estimated_balance: est ? +Number(est.estimated || 0).toFixed(2) : null,
+      utilization_pct: est && Number(c.creditLimit) > 0 ? +((Number(est.estimated || 0) / Number(c.creditLimit)) * 100).toFixed(1) : null,
+    };
+  });
+  const activeSubscriptions = (subscriptions || [])
+    .filter(s => s.active !== false)
+    .map(s => ({
+      name: s.name,
+      amount: +Number(s.amount || 0).toFixed(2),
+      cycle: s.cycle || 'monthly',
+      monthly_amount: +(s.cycle === 'yearly' ? Number(s.amount || 0) / 12 : Number(s.amount || 0)).toFixed(2),
+      category: s.category || null,
+      debit_day: s.debitDay || null,
+    }));
+  const upcomingSchedules = (scheduledMovements || [])
+    .filter(s => s.active !== false)
+    .slice(0, 20)
+    .map(s => ({
+      kind: s.kind,
+      label: s.label,
+      amount: +Number(s.amount || 0).toFixed(2),
+      frequency: s.frequency || 'monthly',
+      day_of_month: s.dayOfMonth || null,
+      day_of_week: s.dayOfWeek == null ? null : s.dayOfWeek,
+      auto_apply: !!s.autoApply,
+    }));
+  const goals = (savingsGoals || []).map(g => ({
+    name: g.name,
+    target: +Number(g.target || 0).toFixed(2),
+    saved_so_far: +Number(g.savedSoFar || 0).toFixed(2),
+    deadline: g.deadline || null,
+  }));
+  const totalDebt = creditCards.reduce((s, c) => s + Math.max(0, Number(c.estimated_balance || 0)), 0);
+  const totalCash = cashAccounts.reduce((s, a) => s + Number(a.balance || 0), 0);
+  const projectedCash = (typeof projectCashTrend === 'function') ? projectCashTrend() : null;
 
   return {
     today,
@@ -8827,22 +9100,67 @@ function sageBuildContext() {
     last_month_total_spend: +lastMonthSpend.toFixed(2),
     spend_by_category_this_month: Object.fromEntries(Object.entries(byCat).map(([k, v]) => [k, +v.toFixed(2)])),
     income_this_month: +incomeMonth.toFixed(2),
+    total_cash: +totalCash.toFixed(2),
+    total_credit_debt_estimate: +totalDebt.toFixed(2),
+    estimated_net_worth: +(totalCash - totalDebt).toFixed(2),
+    cash_projection_3_months: projectedCash ? {
+      projected_cash: +Number(projectedCash.projected3mo || 0).toFixed(2),
+      delta: +Number(projectedCash.delta || 0).toFixed(2),
+      forward_income: +Number(projectedCash.forwardIncome || 0).toFixed(2),
+      avg_monthly_expense: +Number(projectedCash.avgMonthlyExpense || 0).toFixed(2),
+      scheduled_net: +Number(projectedCash.scheduledNet || 0).toFixed(2),
+      expense_months_sampled: projectedCash.expenseMonthsSampled || 0,
+    } : null,
     active_cards: CARDS.length,
-    subscriptions_count: subscriptions.filter(s => s.active !== false).length,
+    cash_accounts: cashAccounts,
+    credit_cards: creditCards,
+    active_subscriptions: activeSubscriptions,
+    subscriptions_count: activeSubscriptions.length,
+    monthly_subscription_total: +activeSubscriptions.reduce((s, sub) => s + sub.monthly_amount, 0).toFixed(2),
+    upcoming_schedules: upcomingSchedules,
+    savings_goals: goals,
     recent_transactions: recentTx,
   };
 }
 
-const SAGE_QA_SYSTEM = `You are Sage, a calm and direct personal-finance assistant inside a budgeting app called SpendLens. You answer the user's question using only the data provided in the user message. Today's date is included in the data — use it to reason about whether expenses fit the rest-of-month budget.
+const SAGE_QA_SYSTEM = `You are Sage, a calm and direct personal-finance advisor inside a budgeting app called SpendLens. You answer using only the data provided in the user message. Today's date is included in the data — use it to reason about spending, cash flow, debt, income, subscriptions, budgets, goals, account balances, and upcoming scheduled movements.
 
 Style:
 - Plain prose, 1-3 short paragraphs. No headers, no bullet lists unless the user explicitly asks.
 - Use $ amounts to two decimals.
 - Be specific: name merchants, categories, and dates from the data when relevant.
 - If the user asks "can I afford X", compute remaining overall budget and remaining days in the month, then give a direct yes/no with the math behind it.
-- If a question can't be answered from the data, say so briefly and suggest what to track.
+- If the user asks for advice, give a concrete next action based on the data, and call out the tradeoff.
+- If a question can't be answered from the data, say what is missing and suggest what to track next.
 
-Never invent numbers. Never recommend specific financial products.`;
+Never invent numbers. Do not present yourself as a licensed financial advisor. Do not give tax, legal, or investment-product recommendations.`;
+
+const SAGE_MONEY_RE = /\$\s*\d|(?:^|\s)(\d+(?:\.\d+)?)\s*(?:dollar|dollars|buck|bucks|usd)\b/i;
+function sageHasAmount(text) { return SAGE_MONEY_RE.test(text || ''); }
+function sageText(text) { return String(text || '').toLowerCase(); }
+function sageMentionsCard(text, cards = CARDS) {
+  const lower = sageText(text);
+  return (cards || []).some(c => {
+    const name = sageText(c.name);
+    const issuer = sageText(c.issuer || '').replace(/-/g, ' ');
+    const last4 = sageText(c.last4 || '');
+    return (name && lower.includes(name)) ||
+           (issuer && lower.includes(issuer)) ||
+           (last4 && lower.includes(last4));
+  });
+}
+function sageLooksLikeBuildBudget(text) {
+  const lower = sageText(text);
+  return /\b(build|create|make|generate|draft|recommend|suggest|plan)\b/.test(lower) &&
+         /\b(full\s+)?budgets?\b/.test(lower) &&
+         !/\b(set|change|update)\b/.test(lower);
+}
+function sageLooksLikeAddForm(text) {
+  const lower = sageText(text);
+  return /\b(add|new|create|log|enter)\b/.test(lower) &&
+         /\b(transaction|expense|charge|purchase)\b/.test(lower) &&
+         !sageHasAmount(text);
+}
 
 async function sageChat(userMessage) {
   if (sageBusy) return;
@@ -8851,6 +9169,9 @@ async function sageChat(userMessage) {
   // "I paid $200" matches both the pay regex and the (broader) add regex,
   // and "I subscribed to Netflix $15" should hit the subscription handler
   // not the add-transaction one.
+  if (sageLooksLikeBuildBudget(userMessage)) {
+    return sageBuildBudget(userMessage);
+  }
   if (sageLooksLikePay(userMessage)) {
     sageAppendMsg('user', userMessage);
     return sagePayFromText(userMessage);
@@ -8863,13 +9184,13 @@ async function sageChat(userMessage) {
     sageAppendMsg('user', userMessage);
     return sageSubFromText(userMessage);
   }
-  if (sageLooksLikeSchedule(userMessage)) {
-    sageAppendMsg('user', userMessage);
-    return sageScheduleFromText(userMessage);
-  }
   if (sageLooksLikeSetBudget(userMessage)) {
     sageAppendMsg('user', userMessage);
     return sageSetBudgetFromText(userMessage);
+  }
+  if (sageLooksLikeSchedule(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    return sageScheduleFromText(userMessage);
   }
   if (sageLooksLikeIncome(userMessage)) {
     sageAppendMsg('user', userMessage);
@@ -8882,6 +9203,11 @@ async function sageChat(userMessage) {
   if (sageLooksLikeAdd(userMessage)) {
     sageAppendMsg('user', userMessage);
     return sageAddTransactionFromText(userMessage);
+  }
+  if (sageLooksLikeAddForm(userMessage)) {
+    sageAppendMsg('user', userMessage);
+    sageAppendMsg('assistant', 'Tell me the full transaction in one sentence, for example: "Spent $24.50 at Starbucks on Amex yesterday." You can also tap "Add via form / paste SMS" below if you want the manual form.');
+    return;
   }
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
@@ -8935,11 +9261,10 @@ function sageSubmit() {
 // Sage extracts amount/merchant/card/category/date with structured output,
 // shows a preview card, and only saves on explicit confirm.
 
-const SAGE_ADD_INTENT_RE = /\b(spent|paid|bought|charged|just\s+got|i\s+got|grabbed|picked\s+up|add(ed)?(\s+a)?\s+(\$|tx|charge|expense|payment)|log(ged)?(\s+a)?)\b/i;
+const SAGE_ADD_INTENT_RE = /\b(spent|bought|charged|purchased|grabbed|picked\s+up|add(?:ed)?(?:\s+a)?\s+(?:\$|tx|transaction|charge|expense|purchase)|log(?:ged)?(?:\s+a)?\s+(?:\$|tx|transaction|charge|expense|purchase))\b/i;
 function sageLooksLikeAdd(text) {
   // Has a $ amount or "X dollars" AND a verb suggesting a purchase
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  return hasAmount && SAGE_ADD_INTENT_RE.test(text);
+  return sageHasAmount(text) && (SAGE_ADD_INTENT_RE.test(text) || /\bpaid\b/i.test(text));
 }
 
 function sageHintAdd() {
@@ -9218,8 +9543,14 @@ function sageRenderDeleteCandidates(txs) {
 }
 
 // ─── Log card payment via Sage ───────────────────────────────
-const SAGE_PAY_INTENT_RE = /\b(paid|payment|paying|pay)\b.+\$|\b(paid|payment|paying)\b.+\b(toward|towards|on|to|for)\b.+\b(card|bill|amex|chase|wells|discover|capital|citi)\b/i;
-function sageLooksLikePay(text) { return SAGE_PAY_INTENT_RE.test(text); }
+const SAGE_PAY_INTENT_RE = /\b(?:log|record|add|make|made)?\s*(?:a\s+)?(?:credit\s+card|card)?\s*payment\b|\b(?:paid|payment|paying|pay)\b.+\b(?:toward|towards|on|to|for)\b.+\b(?:card|bill|amex|chase|wells|discover|capital|citi|sapphire|visa|mastercard)\b/i;
+function sageLooksLikePay(text) {
+  const lower = sageText(text);
+  if (SAGE_PAY_INTENT_RE.test(text)) return true;
+  return /\b(?:paid|pay|paying|payment)\b/.test(lower) &&
+         sageMentionsCard(text, CARDS.filter(c => (c.type || 'credit') === 'credit')) &&
+         !/\b(?:at|from)\s+\w+/.test(lower);
+}
 
 function sagePaySchema() {
   const cardIds = [...CARDS.map(c => c.id), 'unknown'];
@@ -9253,6 +9584,10 @@ async function sagePayFromText(text) {
   if (sageBusy) return;
   if (CARDS.length === 0) {
     sageAppendMsg('error', '⚠️ Add a card in Settings before logging a payment.');
+    return;
+  }
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the payment amount and card, for example: "Log a $300 payment toward Amex Gold today."');
     return;
   }
   sageBusy = true;
@@ -9313,6 +9648,11 @@ function sageRenderPayPreview(p) {
     const finalCardId = (document.getElementById('sagePayCardPick')?.value) || cardObj?.id;
     if (!finalCardId) { sageAppendMsg('error', '⚠️ Pick a card first.'); return; }
     savePayment(finalCardId, 'sage', +p.amount, p.date);
+    if (typeof renderFinanceHub === 'function') renderFinanceHub();
+    if (typeof renderPaymentsPage === 'function') renderPaymentsPage();
+    if (typeof renderDebtPlanner === 'function') renderDebtPlanner();
+    if (typeof renderAccountsPage === 'function') renderAccountsPage();
+    if (typeof renderAll === 'function') renderAll();
     card.remove();
     sageAppendMsg('assistant', `✓ Logged payment of ${fmtMoney((+p.amount))} on ${p.date}.`);
   };
@@ -9454,7 +9794,7 @@ const SAGE_BUDGET_SCHEMA = {
   additionalProperties: false,
 };
 
-async function sageBuildBudget() {
+async function sageBuildBudget(promptText = 'Build me a monthly budget') {
   if (sageBusy) return;
   // Aggregate last 90 days of spend by category (Pacific calendar).
   const cutoff = ptDateOffset(-90);
@@ -9467,7 +9807,7 @@ async function sageBuildBudget() {
   SAGE_CATEGORY_IDS.forEach(id => byCat[id] = 0);
   recent.forEach(t => { byCat[t.category] = (byCat[t.category] || 0) + t.amount; });
 
-  sageAppendMsg('user', 'Build me a monthly budget');
+  sageAppendMsg('user', promptText || 'Build me a monthly budget');
   sageAppendTyping();
 
   const overall = budgets.overall || null;
@@ -9479,6 +9819,7 @@ async function sageBuildBudget() {
 
   try {
     sageBusy = true;
+    document.getElementById('sageSend').disabled = true;
     const resp = await askSage({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
@@ -9497,6 +9838,7 @@ async function sageBuildBudget() {
     sageAppendMsg('error', '⚠️ ' + e.message);
   } finally {
     sageBusy = false;
+    document.getElementById('sageSend').disabled = false;
   }
 }
 
@@ -9549,8 +9891,9 @@ const DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // ─── 1) SET ONE BUDGET ────────────────────────────────────────────────
 const SAGE_SET_BUDGET_INTENT_RE = /\b(?:budget|limit|cap|spend\s+limit|spending\s+limit|monthly\s+(?:budget|limit|cap))\b/i;
 function sageLooksLikeSetBudget(text) {
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  return hasAmount && SAGE_SET_BUDGET_INTENT_RE.test(text);
+  const lower = sageText(text);
+  return SAGE_SET_BUDGET_INTENT_RE.test(text) &&
+         /\b(?:set|change|update|make|put|cap|limit)\b/.test(lower);
 }
 
 const SAGE_SET_BUDGET_SYSTEM = `You parse a budget setting from natural language.
@@ -9582,6 +9925,10 @@ function sageSetBudgetSchema() {
 
 async function sageSetBudgetFromText(text) {
   if (sageBusy) return;
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the target and amount, for example: "Set groceries budget to $500/month" or "Set overall budget to $3,000."');
+    return;
+  }
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
@@ -9659,8 +10006,10 @@ function sageRenderSetBudgetPreview(p) {
 // ─── 2) SCHEDULE A MOVEMENT ──────────────────────────────────────────
 const SAGE_SCHEDULE_INTENT_RE = /\b(?:schedul[ei]|recurring|every\s+(?:mon|tue|wed|thu|fri|sat|sun)|every\s+\w+day|on\s+the\s+\d+(?:st|nd|rd|th)?\b|auto[\s\-]?(?:transfer|pay|debit|deposit)|monthly\s+(?:transfer|payment|deposit)|rent\b)/i;
 function sageLooksLikeSchedule(text) {
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  return hasAmount && SAGE_SCHEDULE_INTENT_RE.test(text);
+  const lower = sageText(text);
+  return SAGE_SCHEDULE_INTENT_RE.test(text) ||
+         (/\b(?:schedule|recurring|auto|every)\b/.test(lower) &&
+          /\b(?:transfer|outflow|payment|pay|income|deposit|rent|bill)\b/.test(lower));
 }
 
 const SAGE_SCHEDULE_SYSTEM = `You parse a recurring scheduled cash movement from natural language.
@@ -9715,6 +10064,10 @@ function sageScheduleSchema() {
 
 async function sageScheduleFromText(text) {
   if (sageBusy) return;
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the amount, cadence, and accounts. For example: "Schedule rent $2,000 from Checking on the 1st" or "Transfer $500 to savings every Thursday."');
+    return;
+  }
   const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
   const credits = CARDS.filter(c => (c.type || 'credit') === 'credit');
   if (cashAccts.length === 0 && credits.length === 0) {
@@ -9828,8 +10181,9 @@ function sageRenderSchedulePreview(p) {
 // ─── 3) ADD SUBSCRIPTION ─────────────────────────────────────────────
 const SAGE_SUB_INTENT_RE = /\b(?:subscrib(?:e|ed|ing|tion)|recurring\s+(?:charge|sub)|i'?m\s+paying\s+for)\b/i;
 function sageLooksLikeSub(text) {
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  return hasAmount && SAGE_SUB_INTENT_RE.test(text);
+  const lower = sageText(text);
+  return SAGE_SUB_INTENT_RE.test(text) ||
+         (/\b(?:add|log|create|new)\b/.test(lower) && /\b(?:subscription|sub)\b/.test(lower));
 }
 
 const SAGE_SUB_SYSTEM = `You parse a subscription from natural language.
@@ -9866,6 +10220,10 @@ function sageSubSchema() {
 
 async function sageSubFromText(text) {
   if (sageBusy) return;
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the service and amount, for example: "Add Spotify subscription $10.99/month on Chase."');
+    return;
+  }
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
@@ -9953,8 +10311,9 @@ function sageRenderSubPreview(p) {
 // ─── 4) LOG INCOME ────────────────────────────────────────────────────
 const SAGE_INCOME_INTENT_RE = /\b(?:got\s+paid|paycheck|salary|bonus|commission|i\s+(?:get|earn|earn\s+a)\s+\$|log\s+(?:income|\$)|deposit\s+\$|received\s+\$|freelance\s+(?:payment|income))\b/i;
 function sageLooksLikeIncome(text) {
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  return hasAmount && SAGE_INCOME_INTENT_RE.test(text);
+  const lower = sageText(text);
+  return SAGE_INCOME_INTENT_RE.test(text) ||
+         (/\b(?:add|log|record|create|new)\b/.test(lower) && /\b(?:income|paycheck|salary|deposit|pay)\b/.test(lower));
 }
 
 const SAGE_INCOME_SYSTEM = `You parse an income entry from natural language.
@@ -9997,6 +10356,10 @@ function sageIncomeSchema() {
 
 async function sageIncomeFromText(text) {
   if (sageBusy) return;
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the amount and cadence, for example: "Log $4,500 salary monthly to Checking" or "Got paid $800 freelance today."');
+    return;
+  }
   sageBusy = true;
   document.getElementById('sageSend').disabled = true;
   sageAppendTyping();
@@ -10090,14 +10453,12 @@ function sageRenderIncomePreview(p) {
 // ─── 5) SET ACCOUNT BALANCE ──────────────────────────────────────────
 const SAGE_BALANCE_INTENT_RE = /\b(?:balance|set\s+\w+(?:\s+\w+)?\s+(?:to|at)\s+\$|my\s+\w+(?:\s+\w+)?\s+(?:has|is|now\s+has)\s+\$|update\s+balance)\b/i;
 function sageLooksLikeBalance(text) {
-  const hasAmount = /\$\s*\d|(\d+(\.\d+)?)\s*(dollar|buck|usd)/i.test(text);
-  // Only treat as balance if a cash-account name appears in the text.
-  if (!hasAmount) return false;
   if (!SAGE_BALANCE_INTENT_RE.test(text)) return false;
   const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
   if (cashAccts.length === 0) return false;
   const lower = text.toLowerCase();
-  return cashAccts.some(a => lower.includes((a.name || '').toLowerCase()) ||
+  return /\b(?:balance|update|set)\b/.test(lower) ||
+         cashAccts.some(a => lower.includes((a.name || '').toLowerCase()) ||
                              lower.includes((a.accountSubtype || '').toLowerCase()));
 }
 
@@ -10128,6 +10489,10 @@ async function sageBalanceFromText(text) {
   const cashAccts = CARDS.filter(c => c.type === 'bank' || c.type === 'debit');
   if (cashAccts.length === 0) {
     sageAppendMsg('error', '⚠️ Add a bank or debit account first.');
+    return;
+  }
+  if (!sageHasAmount(text)) {
+    sageAppendMsg('assistant', 'Tell me the account and new balance, for example: "Checking balance is $1,200" or "Set savings to $7,500."');
     return;
   }
   sageBusy = true;
