@@ -7668,6 +7668,7 @@ const GFW_SOURCE_LABELS = {
   adjustment: 'Adjustment',
 };
 
+let gfwLoadError = null;
 async function loadGuiltFreeWallet() {
   if (!currentUserId) return;
   try {
@@ -7677,10 +7678,13 @@ async function loadGuiltFreeWallet() {
       description: r.description, reference_id: r.reference_id,
       occurred_at: r.occurred_at,
     }));
-    renderGuiltFreeWalletCard();
+    gfwLoadError = null;
   } catch (e) {
     console.warn('guilt_free_wallet load failed', e);
+    gfwLoadError = e && e.message ? e.message : String(e);
+    // Most likely cause: migration not yet applied. Surface it.
   }
+  renderGuiltFreeWalletCard();
 }
 
 function gfwBalance() {
@@ -7691,18 +7695,24 @@ function renderGuiltFreeWalletCard() {
   const card = document.getElementById('guiltFreeWalletCard');
   const bal = document.getElementById('gfwBalance');
   if (!card || !bal) return;
-  const balance = gfwBalance();
-  // Hide entirely if there's never been a deposit — keeps the dashboard
-  // clean for users who don't use REPS.
-  if (gfwTxns.length === 0) { card.style.display = 'none'; return; }
+  // Hide if we don't have a user yet — nothing to query against.
+  // Otherwise always show, even at $0.00, so the wiring is visible.
+  if (!currentUserId) { card.style.display = 'none'; return; }
   card.style.display = 'block';
+  const balance = gfwBalance();
   bal.textContent = '$' + balance.toFixed(2);
   const sub = document.getElementById('gfwSub');
   if (sub) {
-    const earned = gfwTxns.filter(t => t.amount > 0).reduce((a,t) => a + t.amount, 0);
-    sub.textContent = balance > 0
-      ? 'Earned by showing up — tap to spend without guilt'
-      : `Earned $${earned.toFixed(0)} all-time · empty for now`;
+    if (gfwLoadError) {
+      sub.innerHTML = '⚠ Run the guilt_free_wallet migration: <span style="color:var(--accent);font-family:var(--font-mono,monospace);font-size:11px">' + escapeHtml(gfwLoadError) + '</span>';
+    } else if (gfwTxns.length === 0) {
+      sub.textContent = 'No rewards yet — finish a REPS workout to start the wallet';
+    } else {
+      const earned = gfwTxns.filter(t => t.amount > 0).reduce((a,t) => a + t.amount, 0);
+      sub.textContent = balance > 0
+        ? 'Earned by showing up — tap to spend without guilt'
+        : `Earned $${earned.toFixed(0)} all-time · empty for now`;
+    }
   }
 }
 
