@@ -934,39 +934,42 @@ body {
   gap: 10px;
   margin-bottom: 14px;
 }
-/* Guilt-Free Wallet card — REPS reward fund mirrored via guilt_free_wallet */
+/* Guilt-Free Wallet card — compact list-row sized so it doesn't dominate
+   the dashboard. REPS reward fund mirrored via guilt_free_wallet. */
 .gfw-card {
-  background: linear-gradient(160deg, var(--bg-card) 0%, rgba(127,169,201,0.10) 130%);
-  border: 1px solid rgba(127,169,201,0.35);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-bottom: 14px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
   cursor: pointer;
-  transition: background 0.15s, transform 0.15s, box-shadow 0.2s;
-  position: relative;
-  overflow: hidden;
+  transition: background 0.15s, transform 0.1s;
 }
 .gfw-card:active { transform: scale(0.995); }
-.gfw-card::after {
-  content: ""; position: absolute; top: -30px; right: -30px;
-  width: 140px; height: 140px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(127,169,201,0.18), transparent 70%);
-  pointer-events: none;
-}
-.gfw-card-row { display: flex; align-items: center; justify-content: space-between; }
+.gfw-card:hover { background: var(--bg); }
+.gfw-card-row-compact { display: flex; align-items: center; gap: 10px; }
+.gfw-card-left { flex: 1; min-width: 0; }
 .gfw-card-label {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.3px;
-  color: var(--text-muted); text-transform: uppercase;
+  font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.gfw-card-source {
-  font-size: 11px; color: #7FA9C9; letter-spacing: 0.2px; font-weight: 500;
+.gfw-card-source { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+.gfw-card-sub {
+  font-size: 11px; color: var(--text-muted); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .gfw-card-balance {
-  font-family: var(--font-display, Georgia, serif);
-  font-size: 32px; font-weight: 600; letter-spacing: -1px;
-  color: var(--text); margin-top: 4px; font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono, monospace);
+  font-size: 16px; font-weight: 600;
+  color: var(--text); font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
-.gfw-card-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+.gfw-card-chev {
+  color: var(--text-muted); font-size: 18px; line-height: 1;
+  margin-left: 2px; flex-shrink: 0;
+}
+.gfw-card.gfw-error { border-color: rgba(220, 100, 60, 0.45); background: rgba(220, 100, 60, 0.05); }
+.gfw-card.gfw-error .gfw-card-sub { color: #c2553d; }
 
 /* GFW modal — listing the reward txns and spend action */
 .gfw-modal-list { max-height: 50vh; overflow-y: auto; }
@@ -3832,13 +3835,13 @@ select.form-input {
 
   <!-- ═══ GUILT-FREE WALLET (REPS reward fund — shared via guilt_free_wallet table) ═══ -->
   <div id="guiltFreeWalletCard" class="gfw-card" style="display:none" onclick="openGuiltFreeWallet()">
-    <div class="gfw-card-inner">
-      <div class="gfw-card-row">
-        <div class="gfw-card-label">Guilt-Free Wallet</div>
-        <div class="gfw-card-source">from REPS</div>
+    <div class="gfw-card-row-compact">
+      <div class="gfw-card-left">
+        <div class="gfw-card-label">Guilt-Free Wallet <span class="gfw-card-source">· REPS</span></div>
+        <div class="gfw-card-sub" id="gfwSub">Spend without guilt</div>
       </div>
       <div class="gfw-card-balance" id="gfwBalance">$0.00</div>
-      <div class="gfw-card-sub" id="gfwSub">Earned by showing up — spend without guilt</div>
+      <span class="gfw-card-chev">›</span>
     </div>
   </div>
 
@@ -7717,23 +7720,20 @@ function renderGuiltFreeWalletCard() {
   const bal = document.getElementById('gfwBalance');
   if (!card || !bal) return;
   // Hide if we don't have a user yet — nothing to query against.
-  // Otherwise always show, even at $0.00, so the wiring is visible.
   if (!currentUserId) { card.style.display = 'none'; return; }
   card.style.display = 'block';
   const balance = gfwBalance();
-  bal.textContent = '$' + balance.toFixed(2);
   const sub = document.getElementById('gfwSub');
-  if (sub) {
-    if (gfwLoadError) {
-      sub.innerHTML = '⚠ Run the guilt_free_wallet migration: <span style="color:var(--accent);font-family:var(--font-mono,monospace);font-size:11px">' + escapeHtml(gfwLoadError) + '</span>';
-    } else if (gfwTxns.length === 0) {
-      sub.textContent = 'No rewards yet — finish a REPS workout to start the wallet';
-    } else {
-      const earned = gfwTxns.filter(t => t.amount > 0).reduce((a,t) => a + t.amount, 0);
-      sub.textContent = balance > 0
-        ? 'Earned by showing up — tap to spend without guilt'
-        : `Earned $${earned.toFixed(0)} all-time · empty for now`;
-    }
+  card.classList.toggle('gfw-error', !!gfwLoadError);
+  if (gfwLoadError) {
+    bal.textContent = '—';
+    if (sub) sub.textContent = 'Set up not finished — tap for details';
+  } else if (gfwTxns.length === 0) {
+    bal.textContent = '$0.00';
+    if (sub) sub.textContent = 'No rewards yet — finish a REPS workout';
+  } else {
+    bal.textContent = '$' + balance.toFixed(2);
+    if (sub) sub.textContent = balance > 0 ? 'Spend without guilt' : 'Empty for now';
   }
 }
 
@@ -7782,9 +7782,19 @@ function renderGuiltFreeWalletModal() {
   const bal = document.getElementById('gfwModalBalance');
   const list = document.getElementById('gfwModalList');
   if (!bal || !list) return;
+  list.innerHTML = '';
+  if (gfwLoadError) {
+    bal.textContent = '—';
+    list.innerHTML =
+      '<div style="background:rgba(220,100,60,0.08);border:1px solid rgba(220,100,60,0.30);border-radius:12px;padding:14px;margin-bottom:8px">' +
+      '<p style="font-weight:600;margin-bottom:6px;color:#c2553d">Database table missing</p>' +
+      '<p style="font-size:13px;color:var(--text-muted);line-height:1.5;margin-bottom:8px">The shared <code>guilt_free_wallet</code> table hasn\'t been created on Supabase yet. Until you run the migration, REPS and SpendLens can\'t share rewards.</p>' +
+      '<p style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono,monospace);background:var(--bg);padding:6px 8px;border-radius:6px;word-break:break-word">' + escapeHtml(gfwLoadError) + '</p>' +
+      '</div>';
+    return;
+  }
   const balance = gfwBalance();
   bal.textContent = '$' + balance.toFixed(2);
-  list.innerHTML = '';
   if (gfwTxns.length === 0) {
     list.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:24px 0">No activity yet. Open REPS and finish a workout to earn your first reward.</p>';
     return;
